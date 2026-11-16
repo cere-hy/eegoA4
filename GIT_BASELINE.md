@@ -34,5 +34,12 @@
 | 批次 | 变量 | 状态 | 回执 |
 |---|---|---|---|
 | B0 | 计划 | 完成（v1.6 权威白皮书校准） | `/workspace/REBUILD_MASTER_PLAN.md` |
-| B1 | 底座构建 | 首编 SUCCESS；冷编2 验证中 | `docs/rebuild/B1_底座构建回执.md`（本批） |
+| B1 | 底座构建 | **完成**：双冷编同 sha256 `db72df14...`，双源 factory `2c72f26e...`，selfcheck PASS；commit `993c4e63` | `docs/rebuild/B1_底座构建回执.md` |
 | B2–B11 | — | 未开始 | — |
+
+## B1 验证补记
+
+- 两次独立冷编 firmware sha256 完全一致（`db72df145572bcde4b727c9aa16675eef4a032ca0cba2d496e5868607af57d74`）。
+- `archive_segments.py` 自建 factory 与 PlatformIO 自带 factory 逐字节一致（`2c72f26eb90b5bb14ae5330834c1523037b3e2539f226f9110a6bfbde527197f`），selfcheck 四段 PASS。
+- 交付刷机包：`/workspace/eego_a4.factory.bin`（5,502,736 B）。
+- 未验证项：K1 文字页 / 冷启动真机格位抽验（云端无硬件，顺延真机批次）。
