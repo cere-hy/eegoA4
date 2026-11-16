@@ -35,7 +35,7 @@
 |---|---|---|---|
 | B0 | 计划 | 完成（v1.6 权威白皮书校准） | `/workspace/REBUILD_MASTER_PLAN.md` |
 | B1 | 底座构建 | **完成**：双冷编同 sha256 `db72df14...`，双源 factory `2c72f26e...`，selfcheck PASS；commit `993c4e63` | `docs/rebuild/B1_底座构建回执.md` |
-| B2 | S8 裁剪 | **完成**：30 删/5 保留/17 引用清理 + i18n 23 键；strings 四计数全 0；双冷编 app/factory 同 sha（A 级闭合）；commit 见下 | `docs/rebuild/B2_裁剪回执.md` + `B2_路径普查报告.md` |
+| B2 | S8 裁剪 | **完成**：30 删/5 保留/17 引用清理 + i18n 23 键；strings 四计数全 0；双冷编 app/factory 同 sha（A 级闭合）；commit `704912a1` | `docs/rebuild/B2_裁剪回执.md` + `B2_路径普查报告.md` |
 | B3–B11 | — | 未开始 | — |
 
 ## B2 指纹（本批基线）
@@ -45,7 +45,7 @@
 - 双冷编（clean + 空缓存 + epoch 锚 `490813ff`）app/factory 两次同 sha，selfcheck PASS（A 级形式闭合，见点核 §四）
 - strings 四计数：clipping=0 / Clippings=0 / My Clippings=0 / Bookmark=0 ✓
 - 回滚点：git tag `b1-baseline` + `rebuild/b2_backup/`（29MB）
-- 交付刷机包：`/workspace/crosspoint_eegoA4_b2-<commit>-20261117-<commit>_factory.bin`（底座裁剪件，仍非日常用件）
+- 交付刷机包：`/workspace/crosspoint_eegoA4_b2-704912a1-20261117-704912a1_factory.bin`（底座裁剪件，仍非日常用件）
 
 ## B1 验证补记（含点核裁定）
 
