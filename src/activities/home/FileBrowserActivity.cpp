@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <functional>
 
-#include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
@@ -21,7 +20,6 @@
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
-#include "util/BookmarkUtil.h"
 
 namespace fui = freeink::ui;
 
@@ -488,19 +486,10 @@ void FileBrowserActivity::renameSelectedFile(const std::string& oldPath, const s
 
   const std::string oldCachePath = getBookCachePath(oldPath);
   const std::string newCachePath = getBookCachePath(newPath);
-  const bool hasBookmarks = FsHelpers::hasReflowableBookExtension(oldPath);
-  const std::string oldBookmarkPath = hasBookmarks ? BookmarkUtil::getBookmarkPath(oldPath) : "";
-  const std::string newBookmarkPath = hasBookmarks ? BookmarkUtil::getBookmarkPath(newPath) : "";
   bool cacheMoved = false;
-  bool bookmarksMoved = false;
   if (!moveStatePath(oldCachePath, newCachePath, cacheMoved)) return;
-  if (!moveStatePath(oldBookmarkPath, newBookmarkPath, bookmarksMoved)) {
-    rollBackStatePath(oldCachePath, newCachePath, cacheMoved);
-    return;
-  }
-  if (!ClippingStore::moveBook(oldPath, newPath)) {
+  if (!Storage.rename(oldPath.c_str(), newPath.c_str())) {
     LOG_ERR("FileBrowser", "Failed to rename file: %s -> %s", oldPath.c_str(), newPath.c_str());
-    rollBackStatePath(oldBookmarkPath, newBookmarkPath, bookmarksMoved);
     rollBackStatePath(oldCachePath, newCachePath, cacheMoved);
     return;
   }

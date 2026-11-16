@@ -12,7 +12,6 @@
 #include <climits>
 #include <cstdlib>
 
-#include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "activities/ActivityResult.h"
@@ -419,7 +418,7 @@ void ClipSelectionActivity::confirmSelection(const ClippingResult::Action action
   const bool lowMemory = heap.largestBlockBytes < CLIPPING_TEXT_MAX + 1 || heap.freeBytes < requiredHeap;
   if (lowMemory || !buildSelectedText(first, last, result.text)) {
     static constexpr StrId OPTIONS[] = {StrId::STR_BACK};
-    actionPopup.show(lowMemory ? StrId::STR_MEMORY_ERROR : StrId::STR_CLIPPING_TOO_LONG, OPTIONS, 1, 0, [](int) {});
+    actionPopup.show(StrId::STR_MEMORY_ERROR, OPTIONS, 1, 0, [](int) {});
     requestUpdate();
     return;
   }
@@ -684,9 +683,7 @@ Rect ClipSelectionActivity::actionRect() const {
   safe.width = rightEdge - safe.x;
   safe.height = bottomEdge - safe.y;
   const int font = uiScaleSpec().smallFontId;
-  const int labelWidth =
-      std::max({renderer.getTextWidth(font, tr(STR_LOOKUP)), renderer.getTextWidth(font, tr(STR_CLIP)),
-                renderer.getTextWidth(font, tr(STR_BOOKMARK_OPTION))});
+  const int labelWidth = renderer.getTextWidth(font, tr(STR_LOOKUP));
   const int padding = metrics.menuSpacing;
   const int count = actionCount();
   const int width = std::min(safe.width, count * (labelWidth + padding * 2) + padding * (count + 1));

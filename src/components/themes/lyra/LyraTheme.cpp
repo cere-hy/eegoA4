@@ -15,7 +15,6 @@
 #include "components/UITheme.h"
 #include "components/icons/blocks.h"
 #include "components/icons/book.h"
-#include "components/icons/bookmark.h"
 #include "components/icons/cover.h"
 #include "components/icons/folder.h"
 #include "components/icons/hotspot.h"
@@ -57,7 +56,7 @@ const uint8_t* iconForName(UIIcon icon) {
     case UIIcon::Hotspot:
       return HotspotIcon;
     case UIIcon::Bookmark:
-      return BookmarkIcon;
+      return nullptr;  // B2: 书签图标资源已删, 枚举保留兼容, 不画
     case UIIcon::Blocks:
       return BlocksIcon;
     default:

@@ -6,7 +6,6 @@
 #include <LibraryBuilder.h>
 #include <Logging.h>
 
-#include "ClippingStore.h"
 #include "ProtectedPaths.h"
 #include "util/BookCacheUtils.h"
 #include "util/TaskWatchdog.h"
@@ -564,7 +563,7 @@ void WebDAVHandler::handleMove(WebServer& s) {
 
   clearBookCache(srcPath.c_str());
   file.close();
-  const bool success = ClippingStore::moveBook(srcPath.c_str(), dstPath.c_str());
+  const bool success = Storage.rename(srcPath.c_str(), dstPath.c_str());
 
   if (success) {
     s.send(dstExists ? 204 : 201);

@@ -1,0 +1,111 @@
+======================================================================
+B2 路径普查 — 现树 HEAD
+HEAD = 60467a35
+======================================================================
+
+### 一、实删 30 存在性 + 引用面
+
+[存储层(图纸4)] 图纸计 4, 实列 4
+  EXISTS src/ClippingStore.h                                        refs=0
+  EXISTS src/ClippingStore.cpp                                      refs=0
+  EXISTS src/clippings/ClippingsManager.h                           refs=0
+  EXISTS src/clippings/ClippingsManager.cpp                         refs=0
+
+[同步预览(图纸3)] 图纸计 3, 实列 3
+  EXISTS src/clippings/ClippingSync.h                               refs=0
+  EXISTS src/clippings/ClippingSync.cpp                             refs=0
+  EXISTS src/clippings/ClippingPreview.h                            refs=0
+
+[书签数据(图纸4)] 图纸计 4, 实列 5
+  EXISTS src/BookmarkEntry.h                                        refs=0
+  EXISTS src/util/BookmarkFile.h                                    refs=0
+  EXISTS src/util/BookmarkFile.cpp                                  refs=0
+  EXISTS src/util/BookmarkUtil.h                                    refs=0
+  EXISTS src/util/BookmarkUtil.cpp                                  refs=0
+
+[界面(图纸4)] 图纸计 4, 实列 4
+  EXISTS src/activities/reader/EpubReaderBookmarksActivity.h        refs=0
+  EXISTS src/activities/reader/EpubReaderBookmarksActivity.cpp      refs=0
+  EXISTS src/activities/reader/EpubReaderClippingListActivity.h     refs=0
+  EXISTS src/activities/reader/EpubReaderClippingListActivity.cpp   refs=0
+
+[图标(图纸1)] 图纸计 1, 实列 1
+  EXISTS src/components/icons/bookmark.h                            refs=0
+
+[测试(图纸14)] 图纸计 14, 实列 13
+  EXISTS test/clipping_preview/ClippingPreviewTest.cpp              refs=0
+  EXISTS test/clipping_preview/CMakeLists.txt                       refs=0
+  EXISTS test/clipping_store/ClippingStoreTest.cpp                  refs=0
+  EXISTS test/clipping_store/CMakeLists.txt                         refs=0
+  EXISTS test/clipping_store/stubs/esp_random.h                     refs=4
+           <- lib/DeviceSecret/DeviceSecret.cpp
+           <- lib/Epub/BookKey.cpp
+           <- src/util/PluginEvents.cpp
+           <- src/vocabulary/VocabularyStore.cpp
+  EXISTS test/clipping_sync/ClippingSyncTest.cpp                    refs=0
+  EXISTS test/clipping_sync/run.sh                                  refs=0
+  EXISTS test/clipping_sync/stubs/HalMemory.h                       refs=10
+           <- lib/Epub/Epub/converters/GifToFramebufferConverter.cpp
+           <- lib/KOReaderSync/KOReaderSyncClient.cpp
+           <- lib/hal/HalMemory.cpp
+           <- lib/miniz/src/InflateStream.cpp
+           <- src/activities/reader/DictionaryDefinitionActivity.cpp
+           <- src/components/HomeCoverCache.h
+           <- ... 另 4 处
+  EXISTS test/clipping_sync/stubs/KOReaderCredentialStore.h         refs=4
+           <- lib/KOReaderSync/KOReaderSyncClient.cpp
+           <- src/SettingsList.h
+           <- src/activities/settings/KOReaderAuthActivity.cpp
+           <- src/main.cpp
+  EXISTS test/clipping_sync/stubs/Memory.h                          refs=66
+           <- lib/BlePageTurner/test/RuntimeTest.cpp
+           <- lib/BmpToBmpConverter/BmpToBmpConverter.cpp
+           <- lib/EpdFont/SdCardFont.cpp
+           <- lib/EpdFont/SdCardFontRegistry.cpp
+           <- lib/Epub/BookKey.cpp
+           <- lib/Epub/ContentProtection.cpp
+           <- ... 另 60 处
+  EXISTS test/clipping_sync/stubs/SecureHttpClient.h                refs=4
+           <- lib/KOReaderSync/KOReaderSyncClient.cpp
+           <- src/activities/plugins/PluginCatalogActivity.cpp
+           <- src/network/HttpDownloader.cpp
+           <- src/util/PluginHttp.cpp
+  EXISTS test/test_clipping_highlight_planes.py                     refs=0
+  EXISTS test/test_clipping_selection_text.py                       refs=0
+
+实删存在: 30/30
+
+### 二、引用清理 14 存在性
+  EXISTS src/activities/reader/EpubReaderActivity.h
+  EXISTS src/activities/reader/EpubReaderActivity.cpp
+  EXISTS src/activities/reader/EpubReaderMenuActivity.h
+  EXISTS src/activities/reader/EpubReaderMenuActivity.cpp
+  EXISTS src/activities/reader/ClipSelectionActivity.h
+  EXISTS src/activities/reader/ClipSelectionActivity.cpp
+  EXISTS src/activities/ActivityResult.h
+  EXISTS src/components/themes/BaseTheme.cpp
+  EXISTS src/components/themes/lyra/LyraTheme.cpp
+  EXISTS src/activities/home/FileBrowserActivity.cpp
+  EXISTS src/network/CrossPointWebServer.cpp
+  EXISTS src/network/WebDAVHandler.cpp
+  EXISTS src/util/BookCacheUtils.cpp
+  EXISTS src/activities/reader/KOReaderSyncActivity.cpp
+  EXISTS lib/KOReaderSync/KOReaderCredentialStore.cpp
+  EXISTS src/SettingsList.cpp
+  EXISTS src/activities/settings/KOReaderSettingsActivity.cpp
+引用清理存在: 17/17
+
+### 三、保留 5 存在性
+  EXISTS clippings/ClippingText.h                      (src/clippings/ClippingText.h)
+  EXISTS clippings/SelectionGeometry.h                 (src/clippings/SelectionGeometry.h)
+  EXISTS HomeButtonAction::Bookmark/CreateClipping 枚举  (src/HomeButtonSettings.h)
+  EXISTS UIIcon::Bookmark 枚举                           (src/components/UITheme.h)
+  EXISTS KOReader syncClippings JSON 键                 (src/activities/reader/KOReaderSyncActivity.cpp)
+
+### 四、strings 四计数基线 (裁剪前, 应 >0)
+  clipping       444
+  Clippings      61
+  My Clippings   1
+  Bookmark       206
+
+(裁剪后四计数须全 0; 本基线供对照)

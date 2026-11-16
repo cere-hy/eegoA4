@@ -22,7 +22,6 @@
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
-#include "components/icons/bookmark.h"
 #include "components/icons/cover.h"
 #include "components/icons/headerIcons.h"
 #include "fontIds.h"
@@ -39,19 +38,10 @@ constexpr int homeMenuMargin = 20;
 constexpr int homeMarginTop = 30;
 constexpr int subtitleY = 738;
 constexpr int bookmarkStatusIconWidth = 16;
-constexpr int bookmarkStatusIconHeight = 14;
 constexpr int bookmarkStatusIconGap = 4;
-constexpr int bookmarkStatusIconTopCrop = 2;
 
-void drawBookmarkStatusIcon(const GfxRenderer& renderer, const int x, const int y) {
-  constexpr int bytesPerRow = bookmarkStatusIconWidth / 8;
-  for (int row = 0; row < bookmarkStatusIconHeight; ++row) {
-    for (int col = 0; col < bookmarkStatusIconWidth; ++col) {
-      const uint8_t byte = BookmarkStatusIcon[(row + bookmarkStatusIconTopCrop) * bytesPerRow + col / 8];
-      const uint8_t mask = 1U << (7 - (col % 8));
-      renderer.drawPixel(x + col, y + row, (byte & mask) != 0);
-    }
-  }
+void drawBookmarkStatusIcon(const GfxRenderer& /*renderer*/, const int /*x*/, const int /*y*/) {
+  // B2: 书签功能退役, 图标资源已删; 枚举与状态栏调用点保留以兼容持久化配置, 此处空操作。
 }
 
 }  // namespace
@@ -1027,7 +1017,7 @@ void BaseTheme::drawSelectionHandle(const GfxRenderer& renderer, const Rect rect
 void BaseTheme::drawSelectionActions(const GfxRenderer& renderer, const Rect rect, const int count,
                                      const int firstAction) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const char* labels[] = {tr(STR_LOOKUP), tr(STR_CLIP), tr(STR_BOOKMARK_OPTION)};
+  const char* labels[] = {tr(STR_LOOKUP), tr(STR_IGNORE), tr(STR_IGNORE)};
   for (int i = 0; i < count; ++i) {
     const Rect button = selectionGeometry::button(rect, i, metrics.menuSpacing, count);
     renderer.fillRoundedRect(button.x, button.y, button.width, button.height, metrics.controlRadius, Color::White);

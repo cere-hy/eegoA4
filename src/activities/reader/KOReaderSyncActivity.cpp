@@ -21,7 +21,6 @@
 #include "SilentRestart.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
-#include "clippings/ClippingSync.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"  // list icons for the compare rows
 #include "fontIds.h"
@@ -173,31 +172,6 @@ void KOReaderSyncActivity::performSync() {
   const std::string primaryHash = documentHash;
 
   LOG_DBG("KOSync", "Document hash (%s): %s", matchMethodName(primaryMethod), documentHash.c_str());
-
-  if (KOREADER_STORE.getSyncClippings()) {
-    {
-      RenderLock lock(*this);
-      statusMessage = tr(STR_SYNCING_CLIPPINGS);
-    }
-    requestUpdateAndWait();
-    bool clippingsSynced;
-    {
-#if defined(CONFIG_IDF_TARGET_ESP32C3) && CONFIG_IDF_TARGET_ESP32C3
-      RenderLock lock;
-      GfxRenderer::FrameBufferLoan loan(renderer);
-#endif
-      clippingsSynced = clippingSync::run(epubPath, documentHash);
-    }
-    if (!clippingsSynced) {
-      {
-        RenderLock lock(*this);
-        state = SYNC_FAILED;
-        statusMessage = tr(STR_CLIPPING_SYNC_FAILED);
-      }
-      requestUpdate(true);
-      return;
-    }
-  }
 
   {
     RenderLock lock(*this);

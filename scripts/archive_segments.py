@@ -46,6 +46,8 @@ def main():
     ap.add_argument("--boot-app0", required=True, help="path to boot_app0.bin")
     ap.add_argument("--out", required=True, help="output firmware.factory.bin path")
     ap.add_argument("--manifest", required=True, help="output MANIFEST.json path")
+    ap.add_argument("--source-date-epoch", default=os.environ.get("SOURCE_DATE_EPOCH", ""),
+                    help="reproducible build epoch (default: $SOURCE_DATE_EPOCH); recorded in MANIFEST")
     args = ap.parse_args()
 
     segs = {
@@ -105,6 +107,7 @@ def main():
         "app_size": app_size,
         "factory_minus_app": delta,
         "factory_sha256": sha256(args.out),
+        "source_date_epoch": args.source_date_epoch,
         "segments": placed,
         "selfcheck": "PASS (byte-cmp + sha256, all 4 segments)",
     }

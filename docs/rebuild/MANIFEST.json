@@ -7,6 +7,7 @@
   "app_size": 5437200,
   "factory_minus_app": 65536,
   "factory_sha256": "2c72f26eb90b5bb14ae5330834c1523037b3e2539f226f9110a6bfbde527197f",
+  "source_date_epoch": "1794813449",
   "segments": [
     {
       "name": "bootloader",

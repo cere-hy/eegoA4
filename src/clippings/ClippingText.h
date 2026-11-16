@@ -4,6 +4,9 @@
 #include <string>
 #include <string_view>
 
+// B2 保留项: 选词文本预算上限 (原在已删的 ClippingStore.h)。选词/查词路径在用, 随 ClippingText.h 保留。
+inline constexpr size_t CLIPPING_TEXT_MAX = 4U * 1024U;
+
 namespace clippingText {
 inline bool hasVisibleText(const char* text) {
   if (!text) return false;

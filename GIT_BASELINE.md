@@ -35,11 +35,29 @@
 |---|---|---|---|
 | B0 | 计划 | 完成（v1.6 权威白皮书校准） | `/workspace/REBUILD_MASTER_PLAN.md` |
 | B1 | 底座构建 | **完成**：双冷编同 sha256 `db72df14...`，双源 factory `2c72f26e...`，selfcheck PASS；commit `993c4e63` | `docs/rebuild/B1_底座构建回执.md` |
-| B2–B11 | — | 未开始 | — |
+| B2 | S8 裁剪 | **完成**：30 删/5 保留/17 引用清理 + i18n 23 键；strings 四计数全 0；双冷编 app/factory 同 sha（A 级闭合）；commit 见下 | `docs/rebuild/B2_裁剪回执.md` + `B2_路径普查报告.md` |
+| B3–B11 | — | 未开始 | — |
 
-## B1 验证补记
+## B2 指纹（本批基线）
+
+- app sha256 `ea080a81bb789bbf355a3307e083b0fb211108b0126592639865c0d7ee9745e1`（5,370,752 B，较 B1 −66,448 B）
+- factory sha256 `7ab026ee2e02959fa17738aefa857473beb1b23022f2c0c1449c4d424af99892`（5,436,288 B；factory−app=65,536）
+- 双冷编（clean + 空缓存 + epoch 锚 `490813ff`）app/factory 两次同 sha，selfcheck PASS（A 级形式闭合，见点核 §四）
+- strings 四计数：clipping=0 / Clippings=0 / My Clippings=0 / Bookmark=0 ✓
+- 回滚点：git tag `b1-baseline` + `rebuild/b2_backup/`（29MB）
+- 交付刷机包：`/workspace/crosspoint_eegoA4_b2-<commit>-20261117-<commit>_factory.bin`（底座裁剪件，仍非日常用件）
+
+## B1 验证补记（含点核裁定）
 
 - 两次独立冷编 firmware sha256 完全一致（`db72df145572bcde4b727c9aa16675eef4a032ca0cba2d496e5868607af57d74`）。
-- `archive_segments.py` 自建 factory 与 PlatformIO 自带 factory 逐字节一致（`2c72f26eb90b5bb14ae5330834c1523037b3e2539f226f9110a6bfbde527197f`），selfcheck 四段 PASS。
-- 交付刷机包：`/workspace/eego_a4.factory.bin`（5,502,736 B）。
-- 未验证项：K1 文字页 / 冷启动真机格位抽验（云端无硬件，顺延真机批次）。
+- `archive_segments.py` 自建 factory 与 PlatformIO 自带 factory 逐字节一致（`2c72f26eb90b5bb14ae5330834c1523037b3e2539f226f9110a6bfbde527197f`），selfcheck 四段 PASS。三段闭环证据形态采信。
+- MANIFEST 补 `source_date_epoch=1794813449`（真实编译值，可复跑要素），由 archive_segments.py `--source-date-epoch` 自动入册。
+- 交付刷机包（命名整改后）：`/workspace/crosspoint_eegoA4_b1-993c4e63-20261117-993c4e63_factory.bin`（5,502,736 B）；定位标注"底座验证用，非日常用件"，见 `/workspace/刷机件说明.md`。
+- 裁定：B1 **有条件通关**（编译面即时生效）；K1 文字页 / 冷启动真机格位抽验云端不可达，并入 **B11 追责条款**——红格时先刷 B1 底座件复测该格、再查后续批次，分离底座责任与批次责任。
+
+## 点核领账 / 规则（审计）
+
+1. **【账·终态锚适用性】** 白皮书 §1 体积锚 app ≈5,326,400 B 是**终态锚（B11 产物）**，出具时未注明适用批次，致 B1 app 5,437,200 B 需解读方能对表。B1 读数较该锚 +110,800 B 属"含裁剪面、未含 BLE"的预期形态；此锚不作 B1 硬判据，仅作 B11 终态对表。
+2. **【账·上游漂移】** B1 app 较 P4 +52,624 B = 旧基线之后 crosspoint develop 已演进的**上游漂移实据**，构成 B2 路径普查令的依据。
+3. **【规则·行号锚定锚点 commit】** 计划中 file:line 凡采自 HEAD 者，落码前必须对其所声明的锚点 commit 复核（白玉书三端互证基准）。已正确示范：pico-plus 锚点无 `push_part.c`（分片逻辑在 `push_sink.c` 2322 行）；B2 裁剪清单录自旧树，须在现树 HEAD 普查存在性后先报后删。
+4. **【规则·语义版本前导零】** platformio 规范名 `espressif32@55.03.311` 被语义版本解析器拒（前导零 `03` 非法）；本地覆盖改用 `file:///root/.platformio/platforms/espressif32`，绕开 URL 重装 + 版本解析双坑。

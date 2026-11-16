@@ -10,7 +10,6 @@
 #include <optional>
 #include <vector>
 
-#include "BookmarkEntry.h"
 #include "ChapterPosition.h"
 #include "ClipSelectionActivity.h"
 #include "EpubReaderMenuActivity.h"
@@ -44,23 +43,15 @@ class EpubReaderActivity final : public ReaderActivity {
   uint8_t pageLoadRetryCount = 0;
   static constexpr uint8_t MAX_PAGE_LOAD_RETRIES = 3;
   bool automaticPageTurnActive = false;
-  bool showBookmarkMessage = false;
   bool showDictionaryMessage = false;
   unsigned long dictionaryMessageTime = 0UL;
   bool showFontDamagedMessage = false;
   unsigned long fontDamagedMessageTime = 0UL;
-  bool showClippingMessage = false;
-  StrId clippingMessage = StrId::STR_CLIPPING_SAVED;
-  unsigned long clippingMessageTime = 0UL;
-  bool currentPageBookmarked = false;
   int idlePrewarmSpine = -1;
   int idlePrewarmPage = -1;
   int idlePrewarmOffset = 0;
   unsigned long lastRenderCompleteMs = 0;
-  bool bookmarkRemoved = false;
-  std::vector<BookmarkEntry> cachedBookmarks;
   bool recentsEntryRemoved = false;
-  unsigned long bookmarkMessageTime = 0UL;
   bool pendingReadFolderMove = false;
 
   // Toolbar reader menu (SETTINGS.readerMenuStyle == READER_MENU_TOOLBAR): drawn
@@ -209,22 +200,15 @@ class EpubReaderActivity final : public ReaderActivity {
   ClipSelectionActivity::Selection lookupReturnSelection;
   void startClipSelection(int initialX = -1, int initialY = -1,
                           ClipSelectionActivity::Mode mode = ClipSelectionActivity::Mode::Clip);
-  int clippingAtPoint(const Page& page, int x, int y) const;
-  void openClippings();
-  void applyProgressChange(const ProgressChangeResult& progress);
   bool launchKOReaderSync();
   unsigned long confirmLongPressThreshold() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
-  void loadCachedBookmarks();
-  void addBookmark();
-  void updateBookmarkFlag();
 
   void navigateToHref(const std::string& href, bool savePosition = false);
   void restoreSavedPosition();
 
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
-  void drawClippingHighlights(const Page& page, int fontId, int orientedMarginTop, int orientedMarginLeft) const;
   void renderStatusBar() const;
   void applyOrientation(uint8_t orientation);
   void applyInitialOrientation() override;
