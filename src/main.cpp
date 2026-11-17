@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <BlePageTurner.h>
+#include <BlePushGatt.h>
 #include <BoardConfig.h>
 #include <Epub.h>
 #include <FontCacheManager.h>
@@ -297,8 +298,11 @@ bool deliver(const bleturner::Action action) {
   return false;
 }
 
-bool yieldForRadio() { return true; }        // the reader keeps no parser alive between pages
-bool fileTransferActive() { return false; }  // file transfer is a screen of its own: the radio is off there
+bool yieldForRadio() { return true; }  // the reader keeps no parser alive between pages
+// §7 one radio, one master: while the system-level PicoPush peripheral owns the
+// radio, the HID page-turner central refuses to come up (beginOwned checks this
+// before port::begin()). This is connection-level exclusivity, not page-based.
+bool fileTransferActive() { return blepushgatt::radioOwned(); }
 void restartIntoBook() { silentRestartToReader(); }
 
 // The radio needs a steady clock while it is up or changing state.
@@ -674,6 +678,11 @@ void setup() {
   // Restore the monotonic clock floor before anything reads time() (event
   // timestamps, loan-expiry checks).
   trustedtime::init();
+  // B3: bring up the system-level PicoPush GATT peripheral from boot so a phone
+  // can find "PicoPush-XXXX" on the library home without opening any page.
+  // Advertising/link state only ever reaches the UI as ordinary frame content
+  // (g_bleConnected is read at the next normal render) — never a repaint here.
+  blepushgatt::begin();
   bleturner::begin(pageturner::host, SETTINGS.ble);
 
   switch (wakeupReason) {
@@ -841,6 +850,11 @@ void loop() {
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   mappedInputManager.update();
+
+  // B3 push peripheral housekeeping: re-arm advertising after a link drops and
+  // clear stale receive flags. No display work — the status icon rides the next
+  // normal full-frame render via g_bleConnected.
+  blepushgatt::loop();
 
   // Bluetooth page turner, before the USB drive's early return: a card handed to USB stops the radio
   // before anything else.

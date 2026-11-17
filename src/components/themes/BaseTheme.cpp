@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <string>
 
+#include <BlePushGatt.h>
+
 #include "I18n.h"
 #include "RecentBooksStore.h"
 #include "clippings/SelectionGeometry.h"
@@ -24,6 +26,7 @@
 #include "components/UiAppHelpers.h"
 #include "components/icons/cover.h"
 #include "components/icons/headerIcons.h"
+#include "components/icons/listIcons.h"
 #include "fontIds.h"
 
 void BaseTheme::setCheckboxRow(freeink::ui::ListItem& item, const bool checked) {
@@ -921,6 +924,23 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     }
 
     leftClusterWidth += batteryWidth;
+  }
+
+  // Draw BLE push status (EEGO A4 only). Passive frame content: the connected
+  // flag is sampled here during the normal full-frame render — a BLE connect or
+  // disconnect never triggers its own refresh, there is no badge and no blink
+  // state. Solid glyph = phone link up, slashed glyph = advertising/waiting.
+  // Switching it is safe for gray3: every paint is a full-frame diff rebuild.
+  if (BoardConfig::isEegoA4()) {
+    constexpr int bleIconSize = 24;
+    constexpr int bleIconGap = 6;
+    const int bleGap = leftClusterWidth > 0 ? bleIconGap : 0;
+    const int bleX = leftClusterX + leftClusterWidth + bleGap;
+    const int bleY = textY + 2;
+    const uint8_t* glyph = blepushgatt::g_bleConnected.load(std::memory_order_acquire) ? icon_bluetooth_24_bits
+                                                                                      : icon_bluetooth_off_24_bits;
+    renderer.drawIcon(glyph, bleX, bleY, bleIconSize);
+    leftClusterWidth += bleIconSize + bleGap;
   }
 
   // Draw Clock (any board whose RTC probe succeeded)

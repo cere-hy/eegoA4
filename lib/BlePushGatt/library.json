@@ -1,0 +1,11 @@
+{
+  "name": "BlePushGatt",
+  "version": "0.1.0",
+  "description": "B3 BLE push peripheral for the EEGO A4: system-level PicoPush advertising and the frozen 5f10 DATA/CTRL/STATUS GATT service table.",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  },
+  "frameworks": "*",
+  "platforms": "*"
+}
