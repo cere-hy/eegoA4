@@ -37,7 +37,8 @@
 | B1 | 底座构建 | **完成**：双冷编同 sha256 `db72df14...`，双源 factory `2c72f26e...`，selfcheck PASS；commit `993c4e63` | `docs/rebuild/B1_底座构建回执.md` |
 | B2 | S8 裁剪 | **完成**：30 删/5 保留/17 引用清理 + i18n 23 键；strings 四计数全 0；双冷编 app/factory 同 sha（A 级闭合）；commit `704912a1`（+ i18n 补行 `8e34ed38`） | `docs/rebuild/B2_裁剪回执.md` + `B2_路径普查报告.md` |
 | B3 | BLE 连接层 | **完成 + 真机通过 + 点核闭环（v1.7）**：peripheral GATT 推文服务（PicoPush 全局广播 + WWR 三特征 + MTU 247）+ 被动蓝牙状态栏图标 + 一射频一主人排他闸；双冷编 app/factory 同 sha（A 级闭合）；commit `4ad75499`。真机（11-17 哨位）：翻书流畅/蓝牙好/图标在位；`PicoPush-424C`、MTU=247、5f13 订阅成功；`reason=531`=APK 双按钮互斥通道切换（公主补充精化，非缺陷）。点核增量：协议行为档案立档（§7.5）、B6.5 收 RESUME 必需 + 通道切换断流防冲突、token 口径中性化。详见回执 §七/§八 | `B3_BLE连接层回执.md` |
-| B4–B11 | — | 未开始（下一批 B4=§3.2 0x1A 发送，v1.6 未重排；"稳定性上半"实为 B7） | — |
+| B4 | 0x1A 发送 | **完成（纯逻辑核批）**：白皮书 §2.1 权威布局 0x1A scene 编码器（lib/PushSceneCodec，241B 定长/零填充/UTF-8 边界/首帧元数据 4+wl）；host 五向量断言 248 checks/0 red（28B→1帧/payload36、300B→2、1024B→5、空词拒、199B 截 63）；B3 实现 commit `4ad75499` revert 临时 worktree 实跑零冲突。commit `94167d18`（5 文件/+467）。库零源码引用、不链入固件，故不出新 factory 件、固件沿用 B3 `7402f169…`（据点核纯主机侧判据自决，待裁定）。MAC 原文勘误 v1.7.1 随本批入档 | `B4_0x1A发送回执.md` |
+| B5–B11 | — | 未开始（下一批 B5=§3.3 0x07 单帧接收） | — |
 
 ## B2 指纹（本批基线）
 
