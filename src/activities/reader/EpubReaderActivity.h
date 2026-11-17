@@ -18,9 +18,15 @@
 #include "ReaderActivity.h"
 #include "ReaderToolbarUi.h"
 #include "components/OptionPopup.h"
+#include "util/Dictionary.h"  // design-correct v3: the selection card's local lookup backend
 
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
+  // Local RPD1 dictionary shared by the inline definition card. Opened lazily
+  // on the first card lookup and reused for the activity's lifetime.
+  std::unique_ptr<Dictionary> cardDictionary;
+  bool cardDictionaryAttempted = false;
+  bool lookupForCard(const char* word, std::string& definitionOut, std::string& headwordOut);
   std::unique_ptr<Epub::SyncMetadata> vocabularyMetadata;
   std::unique_ptr<Section> section = nullptr;
   int currentSpineIndex = 0;

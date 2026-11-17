@@ -54,6 +54,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/ButtonNavigator.h"
+#include "util/Dictionary.h"  // design-correct v3: inline definition card lookup
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -498,6 +499,34 @@ void EpubReaderActivity::idlePrewarmTick() {
   }
 }
 
+namespace {
+void cardIndexYield(void*) { delay(1); }
+}  // namespace
+
+// Design-correct v3: the definition card's local-dictionary lookup. Opens the
+// RPD1 dict.bin once and reuses it for the activity lifetime. This runs in the
+// selection activity's loop() (no render lock), mirroring WordSelect. A genuine
+// miss returns false → the card shows "未找到该词"; never a crash.
+bool EpubReaderActivity::lookupForCard(const char* word, std::string& definitionOut, std::string& headwordOut) {
+  if (!cardDictionaryAttempted) {
+    cardDictionaryAttempted = true;
+    cardDictionary = makeUniqueNoThrow<Dictionary>();
+    if (cardDictionary && cardDictionary->open(SETTINGS.dictionaryName)) {
+      if (cardDictionary->needsIndex() && !cardDictionary->buildIndex(cardIndexYield, nullptr, nullptr)) {
+        LOG_ERR("DICT", "card lookup: index build failed");
+        cardDictionary.reset();
+      }
+    } else {
+      cardDictionary.reset();
+    }
+  }
+  if (!cardDictionary) return false;
+  Dictionary::LookupResult result = Dictionary::LookupResult::NotFound;
+  const bool found = cardDictionary->lookup(word, definitionOut, headwordOut, &result);
+  LOG_INF("DICT", "card lookup '%s' -> %s (%u)", word, found ? "HIT" : "MISS", (unsigned)result);
+  return found;
+}
+
 void EpubReaderActivity::openDictionaryWordSelect() {
   if (SETTINGS.dictionaryName[0] == '\0') {
     pendingLookupSelection = {};
@@ -550,6 +579,14 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
     LOG_ERR("CLIP", "Failed to allocate selection activity");
     requestUpdate();
     return;
+  }
+  // Design-correct v3: inject the local-dictionary lookup so the selection
+  // card can show the definition inline on release (no button tap). The
+  // DefinitionLookup re-select mode keeps its legacy action-bar/result chain.
+  if (mode != ClipSelectionActivity::Mode::DefinitionLookup) {
+    activity->setLookupHandler([this](const char* word, std::string& defOut, std::string& headOut) {
+      return lookupForCard(word, defOut, headOut);
+    });
   }
   startActivityForResult(std::move(activity), [this, spineIndex, pageNumber, bookTitle = std::move(bookTitle),
                                                author = std::move(author),

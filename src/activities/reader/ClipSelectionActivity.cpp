@@ -36,6 +36,14 @@ constexpr ClippingResult::Action SELECTION_ACTIONS[] = {
     ClippingResult::Action::Lookup, ClippingResult::Action::AiLookup,
     ClippingResult::Action::Clip, ClippingResult::Action::Bookmark};
 
+// Design-correct v3 definition card layout. The card grows upward from the
+// selection, keeps the original popup width, shows up to N definition lines in
+// the left/main area, and reserves a small AI button on the right. Overflow is
+// ellipsised by GfxRenderer::wrappedText (ink-screen: one full refresh total,
+// no in-card paging — see RPD1 card design receipt §1).
+constexpr int CARD_MAX_DEF_LINES = 4;
+constexpr unsigned long AI_FEEDBACK_MS = 1200;
+
 const char* cleanWordStart(const char* text) {
   if (!text) return "";
   if (clippingText::hasEmSpacePrefix(text)) text += 3;
@@ -75,12 +83,13 @@ ClipSelectionActivity::ClipSelectionActivity(GfxRenderer& renderer, MappedInputM
 
 void ClipSelectionActivity::onEnter() {
   Activity::onEnter();
-  // Design-final v2: the on-card RPD1 dictionary (/dict/dict.bin) is an
-  // independent project asset and is always offered as the "dictionary" action,
-  // regardless of whether a StarDict folder is configured. A missing/corrupt
-  // dict.bin degrades to a "not found" popup at lookup time (never a crash), so
-  // the two real buttons (dictionary + AI) are always shown from slot 0.
+  // Design-correct v3: selection commits → an inline definition card appears
+  // with the local RPD1 definition in its left/main area (no button tap). A
+  // missing/corrupt dict.bin degrades to an in-card "not found" state (never a
+  // crash). The legacy action-bar (Lookup/AI) is retained only for the
+  // DefinitionLookup re-select mode; the reader selection uses the card.
   lookupAvailable = true;
+  resetCard();
   fontId = SETTINGS.getReaderFontId();
   lineHeight = renderer.getLineHeight(fontId);
   const bool extracted = extractWords();
@@ -352,6 +361,7 @@ void ClipSelectionActivity::selectIndex(const int index) {
   if (index < 0 || index >= static_cast<int>(wordCount) || index == selected) return;
   selected = index;
   currentPageOffset = words[selected].pageOffset;
+  resetCard();  // selection changed — drop any cached definition
   requestUpdate();
 }
 
@@ -450,6 +460,7 @@ void ClipSelectionActivity::confirmSelection(const ClippingResult::Action action
 }
 
 void ClipSelectionActivity::cancel() {
+  resetCard();
   ActivityResult result;
   result.isCancelled = true;
   setResult(std::move(result));
@@ -482,6 +493,13 @@ void ClipSelectionActivity::loopButtons() {
 }
 
 void ClipSelectionActivity::loop() {
+  // Design-correct v3: perform the blocking SD lookup outside any render lock,
+  // mirroring DictionaryWordSelectActivity::performLookup(). The "Looking…"
+  // card was painted by the requestUpdate() in beginCardLookup().
+  if (cardLookupPending_) {
+    runCardLookup();
+    return;
+  }
   if (wordCount == 0 && !actionPopup.isActive()) {
     cancel();
     return;
@@ -497,15 +515,37 @@ void ClipSelectionActivity::loop() {
   int touchX = 0;
   int touchY = 0;
   if (ignoreInitialTouch) {
-    if (!mappedInput.isScreenTouchHeld(touchX, touchY)) ignoreInitialTouch = false;
+    if (!mappedInput.isScreenTouchHeld(touchX, touchY)) {
+      ignoreInitialTouch = false;
+      // Long-press entry: the user has now released. Selection was already
+      // committed in onEnter, so auto-populate the card here (no button tap).
+      if (rangeStart >= 0 && mode != Mode::DefinitionLookup && lookupHandler_)
+        beginCardLookup();
+      else
+        requestUpdate();
+    }
     return;
   }
   if (!touchDragSelecting && mappedInput.wasScreenTapped(touchX, touchY)) {
     if (rangeStart >= 0) {
-      const int action = actionAt(touchX, touchY);
-      if (action >= 0) {
-        confirmSelection(SELECTION_ACTIONS[firstAction() + action]);
-        return;
+      // Design-correct v3: the definition card owns the popup region. Its left
+      // text area is inert (not a button, never cancels); only the right AI
+      // button is clickable and this batch it just gives a visual ack — no 0x1A.
+      if (cardState_ != CardState::Hidden) {
+        if (aiButtonAt(touchX, touchY) == 0) {
+          aiFeedbackUntil_ = millis() + AI_FEEDBACK_MS;
+          LOG_INF("AI", "AI button ack (placeholder, no 0x1A this batch)");
+          requestUpdate();
+          return;
+        }
+        if (selectionGeometry::contains(cardRect(), touchX, touchY)) return;  // left area inert
+      } else {
+        // Legacy action bar (DefinitionLookup re-select mode) — unchanged.
+        const int action = actionAt(touchX, touchY);
+        if (action >= 0) {
+          confirmSelection(SELECTION_ACTIONS[firstAction() + action]);
+          return;
+        }
       }
       const int first = std::min(rangeStart, selected);
       const int last = std::max(rangeStart, selected);
@@ -520,7 +560,8 @@ void ClipSelectionActivity::loop() {
         cancel();
       } else {
         selected = rangeStart = hit;
-        requestUpdate();
+        if (mode != Mode::DefinitionLookup && lookupHandler_) beginCardLookup();
+        else requestUpdate();
       }
     }
     return;
@@ -558,7 +599,11 @@ void ClipSelectionActivity::loop() {
     touchDragSelecting = false;
     touchDragHasMoved = false;
     touchDragPageEndIndex = -1;
-    requestUpdate();
+    // Selection committed on release → auto-populate the definition card
+    // (no button tap). Applies to reader selection modes; DefinitionLookup
+    // keeps its legacy re-select action bar for chained lookups.
+    if (rangeStart >= 0 && mode != Mode::DefinitionLookup && lookupHandler_) beginCardLookup();
+    else requestUpdate();
     return;
   } else if (mappedInput.wasScreenTouchPressed(touchX, touchY)) {
     if (rangeStart >= 0) {
@@ -636,7 +681,17 @@ bool ClipSelectionActivity::handleButtons(const uint8_t buttons) {
   }
 
   if (buttons & Input::INPUT_CONFIRM) {
-    confirmSelection(isLookup() ? ClippingResult::Action::Lookup : ClippingResult::Action::Clip);
+    // Design-correct v3: for reader selection modes, confirm commits the
+    // selection and shows the definition card instead of finishing. The
+    // DefinitionLookup chain keeps the legacy confirm-to-result behaviour.
+    if (rangeStart < 0) {
+      rangeStart = selected;
+      requestUpdate();
+    } else if (mode != Mode::DefinitionLookup && lookupHandler_) {
+      beginCardLookup();
+    } else {
+      confirmSelection(isLookup() ? ClippingResult::Action::Lookup : ClippingResult::Action::Clip);
+    }
     return true;
   }
 
@@ -731,6 +786,9 @@ void ClipSelectionActivity::ditherGapBetween(const WordBox& a, const WordBox& b,
 }
 
 bool ClipSelectionActivity::renderIncremental() {
+  // The definition card spans beyond the word clip rect; any card state must
+  // take the full-render path so the card is painted/cleared completely.
+  if (cardState_ != CardState::Hidden) return false;
   if (actionPopup.isActive() || mappedInput.hasTouch()) return false;
   if (lastRenderedPageOffset < 0 || lastRenderedPageOffset != currentPageOffset) return false;
   const int offset = textOffset();
@@ -800,6 +858,182 @@ bool ClipSelectionActivity::renderIncremental() {
   return true;
 }
 
+// --- Design-correct v3 definition card ------------------------------------
+
+void ClipSelectionActivity::resetCard() {
+  cardState_ = CardState::Hidden;
+  cardWord_.clear();
+  cardDefinition_.clear();
+  cardHeadword_.clear();
+  cardLookupPending_ = false;
+}
+
+void ClipSelectionActivity::beginCardLookup() {
+  if (cardLookupPending_) return;
+  const int first = std::min(rangeStart, selected);
+  const int last = std::max(rangeStart, selected);
+  std::string word;
+  if (!buildSelectedText(first, last, word) || word.empty()) {
+    resetCard();
+    return;
+  }
+  // Same word already resolved — keep the cached definition (no redundant SD read).
+  if (cardState_ == CardState::Ready && cardWord_ == word) return;
+  cardWord_ = std::move(word);
+  cardDefinition_.clear();
+  cardHeadword_.clear();
+  cardState_ = CardState::Looking;
+  cardLookupPending_ = true;
+  LOG_INF("DICT", "card lookup begin word='%s'", cardWord_.c_str());
+  requestUpdate();  // paint the "Looking…" card before blocking on SD
+}
+
+void ClipSelectionActivity::runCardLookup() {
+  cardLookupPending_ = false;
+  if (!lookupHandler_) {
+    // Integration error (handler not injected): degrade to an in-card miss,
+    // never a crash — consistent with the "not found, never blank" contract.
+    LOG_ERR("DICT", "card lookup: no handler injected");
+    cardState_ = CardState::NotFound;
+    requestUpdate();
+    return;
+  }
+  std::string def;
+  std::string head;
+  const unsigned long lookupStart = millis();
+  const bool ok = lookupHandler_(cardWord_.c_str(), def, head);
+  const unsigned long lookupMs = millis() - lookupStart;
+  if (ok && !def.empty()) {
+    cardDefinition_ = std::move(def);
+    cardHeadword_ = std::move(head);
+    cardState_ = CardState::Ready;
+    LOG_INF("DICT", "card lookup HIT word='%s' head='%s' bytes=%u in %lums", cardWord_.c_str(),
+            cardHeadword_.c_str(), (unsigned)cardDefinition_.size(), lookupMs);
+  } else {
+    cardState_ = CardState::NotFound;
+    LOG_INF("DICT", "card lookup MISS word='%s' in %lums", cardWord_.c_str(), lookupMs);
+  }
+  requestUpdate();
+}
+
+Rect ClipSelectionActivity::cardRect() const {
+  // Keep the popup width unchanged (same two-slot width as the legacy bar),
+  // grow only the height upward so N definition lines fit.
+  Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  int top, right, bottom, left;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  const int rightEdge = std::min(safe.x + safe.width, renderer.getScreenWidth() - right);
+  const int bottomEdge = std::min(safe.y + safe.height, renderer.getScreenHeight() - bottom);
+  safe.x = std::max(safe.x, left);
+  safe.y = std::max(safe.y, top) + std::max(metrics.topPadding, metrics.verticalSpacing);
+  safe.width = rightEdge - safe.x;
+  safe.height = bottomEdge - safe.y;
+
+  const int font = uiScaleSpec().smallFontId;
+  const int labelWidth = renderer.getTextWidth(font, tr(STR_LOOKUP));
+  const int padding = metrics.menuSpacing;
+  const int count = 2;  // same width budget as the legacy two-button bar
+  const int width = std::min(safe.width, count * (labelWidth + padding * 2) + padding * (count + 1));
+  const int lineH = renderer.getLineHeight(font);
+  const int height = padding * 2 + lineH * (1 + CARD_MAX_DEF_LINES);  // headword row + N def lines
+
+  int first = std::min(rangeStart, selected);
+  const int last = std::max(rangeStart, selected);
+  while (first < last && words[first].pageOffset < currentPageOffset) ++first;
+  return selectionGeometry::actions(safe, selectionTop(), height + padding * 2, metrics.verticalSpacing, width,
+                                    words[first].x - padding);
+}
+
+Rect ClipSelectionActivity::cardAiButtonRect(const Rect& card) const {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int font = uiScaleSpec().smallFontId;
+  const int padding = metrics.menuSpacing;
+  const int labelW = renderer.getTextWidth(font, "AI");
+  const int btnW = labelW + padding * 2;
+  const int btnH = renderer.getLineHeight(font) + padding;
+  const int x = card.x + card.width - padding - btnW;
+  const int y = card.y + (card.height - btnH) / 2;
+  return Rect{x, y, btnW, btnH};
+}
+
+int ClipSelectionActivity::aiButtonAt(const int x, const int y) const {
+  if (cardState_ == CardState::Hidden) return -1;
+  const Rect ai = cardAiButtonRect(cardRect());
+  return selectionGeometry::contains(ai, x, y) ? 0 : -1;
+}
+
+void ClipSelectionActivity::drawDefinitionCard() const {
+  const Rect card = cardRect();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int font = uiScaleSpec().smallFontId;
+  const int lineH = renderer.getLineHeight(font);
+  const int padding = metrics.menuSpacing;
+
+  // Card body: white rounded rect with a thin border (matches action-bar look).
+  renderer.fillRoundedRect(card.x, card.y, card.width, card.height, metrics.controlRadius, Color::White);
+  renderer.drawRoundedRect(card.x, card.y, card.width, card.height, 1, metrics.controlRadius, true);
+
+  // Left/main text area occupies everything except the right AI button column.
+  const Rect ai = cardAiButtonRect(card);
+  const int textX = card.x + padding;
+  const int textY = card.y + padding;
+  const int textW = std::max(16, ai.x - padding - textX);
+
+  switch (cardState_) {
+    case CardState::Looking: {
+      renderer.drawText(font, textX, textY, tr(STR_DICT_LOOKING_UP), true, EpdFontFamily::REGULAR);
+      break;
+    }
+    case CardState::Ready: {
+      // SD-card fonts need glyphs built before drawText; include BOLD for the
+      // headword row (same 0x03 mask the definition viewer uses).
+      if (renderer.isSdCardFont(font)) {
+        renderer.ensureSdCardFontReady(font, cardDefinition_.c_str(), 0x03 /* REGULAR + BOLD */);
+        renderer.ensureSdCardFontReady(font, cardHeadword_.c_str(), 0x03);
+      }
+      // Headword row (bold) — use matched headword, fall back to the selected word.
+      const char* head = cardHeadword_.empty() ? cardWord_.c_str() : cardHeadword_.c_str();
+      renderer.drawText(font, textX, textY, head, true, EpdFontFamily::BOLD);
+      // Flatten RPD1 plain-text definition (\n separated, \x01 headword marker)
+      // into wrapped lines; overflow is ellipsised by wrappedText at N lines.
+      std::string flat;
+      flat.reserve(cardDefinition_.size());
+      for (const char c : cardDefinition_) {
+        if (c == '\x01') continue;  // headword marker — already shown as the bold row
+        flat += (c == '\n' || c == '\r') ? ' ' : c;
+      }
+      const auto lines = renderer.wrappedText(font, flat.c_str(), textW, CARD_MAX_DEF_LINES, EpdFontFamily::REGULAR);
+      int y = textY + lineH;
+      for (const auto& line : lines) {
+        if (y + lineH > card.y + card.height) break;
+        renderer.drawText(font, textX, y, line.c_str(), true, EpdFontFamily::REGULAR);
+        y += lineH;
+      }
+      break;
+    }
+    case CardState::NotFound: {
+      // Product requirement: never blank — show the literal "未找到该词".
+      renderer.drawText(font, textX, textY, "未找到该词", true, EpdFontFamily::REGULAR);
+      break;
+    }
+    case CardState::Error: {
+      renderer.drawText(font, textX, textY, tr(STR_DICT_ERROR), true, EpdFontFamily::REGULAR);
+      break;
+    }
+    case CardState::Hidden:
+    default:
+      break;
+  }
+
+  // AI button: placeholder this batch — press gives a visual ack only, no 0x1A.
+  const bool pressed = millis() < aiFeedbackUntil_;
+  renderer.fillRoundedRect(ai.x, ai.y, ai.width, ai.height, metrics.controlRadius, pressed ? Color::Black : Color::White);
+  renderer.drawRoundedRect(ai.x, ai.y, ai.width, ai.height, 1, metrics.controlRadius, true);
+  UITheme::drawCenteredWrappedText(renderer, ai, font, "AI", 1, !pressed, EpdFontFamily::REGULAR,
+                                   UITheme::TextVerticalAlignment::CENTER);
+}
+
 void ClipSelectionActivity::drawSelection() const {
   const int offset = textOffset();
   const int offsetX = textXOffset();
@@ -819,7 +1053,13 @@ void ClipSelectionActivity::drawSelection() const {
       GUI.drawSelectionHandle(renderer, handleRect(first, true), !words[first].isRtl);
     if (words[last].pageOffset == currentPageOffset)
       GUI.drawSelectionHandle(renderer, handleRect(last, false), words[last].isRtl);
-    if (!touchDragSelecting) GUI.drawSelectionActions(renderer, actionRect(), actionCount(), firstAction());
+    if (!touchDragSelecting) {
+      if (cardState_ != CardState::Hidden) {
+        drawDefinitionCard();  // design-correct v3: left definition text + right AI button
+      } else {
+        GUI.drawSelectionActions(renderer, actionRect(), actionCount(), firstAction());
+      }
+    }
   } else {
     const WordBox& cursor = words[selected];
     renderer.drawRect(cursor.x + offsetX, cursor.y + offset, cursor.width, cursor.height, true);
