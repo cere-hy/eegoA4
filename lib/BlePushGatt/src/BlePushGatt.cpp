@@ -35,6 +35,7 @@ namespace {
 Status s_status;
 DataHandler s_dataHandler = nullptr;
 CtrlHandler s_ctrlHandler = nullptr;
+AiResultHandler s_aiResultHandler = nullptr;  // B5: dedicated 0x07 consumer
 NimBLEServer* s_server = nullptr;
 NimBLECharacteristic* s_data = nullptr;
 NimBLECharacteristic* s_ctrl = nullptr;
@@ -48,6 +49,7 @@ void startAdvertising();
 constexpr uint8_t kOpBegin = 0x01;
 constexpr uint8_t kOpEnd = 0x02;
 constexpr uint8_t kOpAbort = 0x04;
+constexpr uint8_t kOpAiResult = 0x07;  // B5: 0x07 single-frame AI definition
 
 constexpr uint16_t kPreferredMtu = 247;
 
@@ -77,8 +79,15 @@ class CtrlCallbacks : public NimBLECharacteristicCallbacks {
     const std::string v = chr->getValue();
     const uint8_t* p = reinterpret_cast<const uint8_t*>(v.data());
     const size_t n = v.size();
-    // CTRL frame layout: magic(2)=0x5043, version(1), opcode(1) at offset 2.
+    // CTRL frame layout: magic(2)=0x5043, opcode(1), version(1) at offset 2/3.
     const uint8_t op = (n >= 4) ? p[2] : 0;
+    if (op == kOpAiResult) {
+      // B5: 0x07 is the AI-definition result. Route to its dedicated consumer
+      // only — never leak it to the B6.5 push-sink CtrlHandler (separable
+      // responsibility, one variable per batch).
+      if (s_aiResultHandler) s_aiResultHandler(p, n);
+      return;
+    }
     if (op == kOpBegin) {
       g_bleReceiving.store(true, std::memory_order_release);
     } else if (op == kOpEnd || op == kOpAbort) {
@@ -205,6 +214,7 @@ void loop() {
 const Status& status() { return s_status; }
 void setDataHandler(DataHandler h) { s_dataHandler = h; }
 void setCtrlHandler(CtrlHandler h) { s_ctrlHandler = h; }
+void setAiResultHandler(AiResultHandler h) { s_aiResultHandler = h; }
 bool radioOwned() { return s_status.initialized; }
 
 bool canNotifyScene() {
@@ -243,6 +253,7 @@ const Status& status() { return s_inert; }
 uint16_t tokenFromStaMac() { return 0; }
 void setDataHandler(DataHandler) {}
 void setCtrlHandler(CtrlHandler) {}
+void setAiResultHandler(AiResultHandler) {}
 bool radioOwned() { return false; }
 bool sendSceneFrame(const uint8_t*, size_t) { return false; }
 bool canNotifyScene() { return false; }

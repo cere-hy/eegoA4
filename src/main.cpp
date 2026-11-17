@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <BlePageTurner.h>
+#include <AiResultSink.h>
 #include <BlePushGatt.h>
 #include <BoardConfig.h>
 #include <Epub.h>
@@ -683,6 +684,9 @@ void setup() {
   // Advertising/link state only ever reaches the UI as ordinary frame content
   // (g_bleConnected is read at the next normal render) — never a repaint here.
   blepushgatt::begin();
+  // B5: arm the 0x07 AI-definition receive hook (double-slot ring + main-loop
+  // pump). Persistent like B3 advertising, independent of any reader page.
+  aireceivesink::init();
   bleturner::begin(pageturner::host, SETTINGS.ble);
 
   switch (wakeupReason) {
@@ -855,6 +859,9 @@ void loop() {
   // clear stale receive flags. No display work — the status icon rides the next
   // normal full-frame render via g_bleConnected.
   blepushgatt::loop();
+  // B5: consume the latest 0x07 definition frame (decode + append/reflow +
+  // hex留证). Cheap no-op when no frame pending; never blocks the loop.
+  aireceivesink::pump();
 
   // Bluetooth page turner, before the USB drive's early return: a card handed to USB stops the radio
   // before anything else.

@@ -1,0 +1,53 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+// B5 — 0x07 AI 释义单帧接收固件桥接（EEGO A4 rebuild）。
+//
+// On the NimBLE host task a phone's 0x07 CTRL write lands here via the
+// dedicated BlePushGatt::AiResultHandler hook. That callback only publishes
+// the raw 241B frame into the PushAiResultCodec double-slot ring (fast, no
+// allocation, no display work). The main loop calls pump() which takes the
+// latest complete frame, decodes it against the whitepaper §2.2 field table,
+// runs the on-screen decision (append/reflow→jump-last-page; reflow fail→
+// rollback) and keeps a hex trace for audit.
+//
+// Design constraints (B5 card / v1.6):
+//   * Producer (BLE task) and consumer (main loop) never touch the same slot:
+//     PushAiResultCodec's per-slot seqlock guarantees a non-torn snapshot.
+//   * Decoding is authoritative-offset based; printable-segment scan is a
+//     cross-check only (mismatch → hex log warning, never silent accept).
+//   * Reflow failure rolls back to the last good text (no half definition).
+//   * 0x07 receive is independent of the reader page lifetime (like B3
+//     persistent advertising); pump() is a cheap no-op when no frame pending.
+namespace aireceivesink {
+
+// Idempotent. Creates the double-slot ring and registers the CTRL 0x07 hook.
+// Safe to call once from setup after blepushgatt::begin().
+void init();
+
+// Main-loop consumer: take latest frame, decode, decide on-screen. Returns
+// true when a new generation was consumed (caller may force a redraw); false
+// when nothing pending or the frame was rejected/duplicate.
+bool pump();
+
+// Latest accepted definition for the dictionary UI (s11 behavior oracle).
+// Copies into caller buffers; returns false if none yet. `generation` is the
+// monotonic 0x07 frame number. `text` is the accumulated on-screen text after
+// append/reflow; `word` is the headword of the latest frame.
+bool latest(char* word, size_t wordCap, char* text, size_t textCap,
+            uint32_t* generation);
+
+// Diagnostics counters (audit).
+struct Stats {
+  uint32_t received;   // 0x07 writes published
+  uint32_t decoded;    // authoritative decode ok
+  uint32_t rejected;   // bad frame / cross-check mismatch
+  uint32_t reflowed;   // append+reflow committed (jump last page)
+  uint32_t rollbacks;  // reflow failed → kept last good text
+  uint32_t duplicate;  // old generation dropped
+};
+Stats stats();
+
+}  // namespace aireceivesink

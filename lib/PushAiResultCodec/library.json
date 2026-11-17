@@ -1,0 +1,15 @@
+{
+  "name": "PushAiResultCodec",
+  "version": "1.0.0",
+  "description": "0x07 AI-definition single-frame receive core per ReadPicoPush whitepaper v1 §2.2 (EEGO A4 rebuild batch B5). Pure C11, host-testable (pthread concurrency).",
+  "keywords": "ble, gatt, 0x07, ai-definition, codec, eego-a4",
+  "authors": {
+    "name": "eegoA4-rebuild",
+    "email": "rebuild@local"
+  },
+  "license": "Apache-2.0",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  }
+}

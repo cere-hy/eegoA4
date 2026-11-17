@@ -1,0 +1,13 @@
+{
+  "name": "AiResultSink",
+  "version": "0.1.0",
+  "description": "B5 0x07 receive glue: CTRL 0x07 → double-slot ring → decode + on-screen reflow/rollback + hex trace",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  },
+  "dependencies": {
+    "BlePushGatt": "*",
+    "PushAiResultCodec": "*"
+  }
+}

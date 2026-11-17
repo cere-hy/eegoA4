@@ -58,6 +58,14 @@ using CtrlHandler = void (*)(uint8_t opcode, const uint8_t* frame, size_t len);
 void setDataHandler(DataHandler h);
 void setCtrlHandler(CtrlHandler h);
 
+// B5: dedicated hook for the 0x07 AI-definition result (CTRL write, opcode at
+// offset 2). Kept separate from the B6.5 CtrlHandler so the two CTRL consumers
+// cannot clobber each other's registration ("one variable per batch" +
+// separable responsibility). Fired on the NimBLE host task with the whole
+// CTRL frame; the sink must copy/publish quickly and defer display work.
+using AiResultHandler = void (*)(const uint8_t* frame, size_t len);
+void setAiResultHandler(AiResultHandler h);
+
 // True while the push peripheral owns the single radio; the HID page-turner
 // central must refuse to start in that window (§7 connection exclusivity).
 bool radioOwned();
