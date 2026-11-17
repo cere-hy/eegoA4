@@ -69,7 +69,10 @@ class ClipSelectionActivity final : public Activity {
   const Page& pageAt(size_t index) const { return *(borrowedPages.empty() ? pages[index] : borrowedPages[index]); }
   bool isLookup() const { return mode != Mode::Clip; }
   int firstAction() const { return lookupAvailable ? 0 : 1; }
-  int actionCount() const { return mode == Mode::DefinitionLookup ? 1 : 3 - firstAction(); }
+  // Design-final v2: the reader selection bar shows two real actions —
+  // dictionary (RPD1 local lookup) and AI (0x1A scene push). DefinitionLookup
+  // (re-select inside a definition) keeps a single "dictionary" action.
+  int actionCount() const { return mode == Mode::DefinitionLookup ? 1 : 2; }
   int actionAt(int x, int y) const;
   int closestInRow(uint16_t row, int centerX) const;
   int wordAt(int x, int y) const;

@@ -17,6 +17,7 @@
 #include "DictionaryRegistry.h"
 #include "StringUtils.h"
 #include "TxtToHtml.h"
+#include <Rpd1Storage.h>  // RPD1 on-card dictionary (/dict/dict.bin)
 
 namespace {
 
@@ -244,6 +245,19 @@ bool Dictionary::open(const char* folderName) {
   basePath.clear();
   hasSyn = false;
   htmlDefinitions = false;
+  rpd1Active_ = false;
+
+  // RPD1 mode (design-final v2): the project's on-card dictionary is
+  // /dict/dict.bin (RPD1 format). If present and valid it takes priority over
+  // StarDict; all public methods branch on rpd1Active_ below, so no caller
+  // changes are needed. A missing/corrupt RPD1 file degrades to StarDict (or to
+  // "no dictionary" if none configured) — never crashes.
+  if (rpd1store::open()) {
+    rpd1Active_ = true;
+    LOG_INF("DICT", "Using RPD1 dictionary (/dict/dict.bin)");
+    return true;
+  }
+
   std::string resolved;
   if (!DictionaryRegistry::resolveBasePath(folderName, resolved)) {
     LOG_ERR("DICT", "No dictionary found in folder '%s'", folderName ? folderName : "");
@@ -316,12 +330,17 @@ bool Dictionary::sidecarIsStale(const std::string& sourcePath, const std::string
 }
 
 bool Dictionary::needsIndex() {
+  if (rpd1Active_) return false;  // RPD1 has its own on-card sparse index — no sidecar build.
   if (!isOpen()) return false;
   if (sidecarIsStale(basePath + ".idx", basePath + ".qidx", QIDX_MAGIC)) return true;
   return hasSyn && sidecarIsStale(basePath + ".syn", basePath + ".sidx", SIDX_MAGIC);
 }
 
 bool Dictionary::buildIndex(void (*yieldFn)(void*), void* ctx, IndexResult* outResult) {
+  if (rpd1Active_) {
+    if (outResult) *outResult = IndexResult::Ok;
+    return true;  // nothing to build for RPD1
+  }
   const auto fail = [outResult](IndexResult r) {
     if (outResult) *outResult = r;
     return false;
@@ -867,6 +886,23 @@ bool Dictionary::lookup(const char* word, std::string& definitionOut, std::strin
     if (outResult) *outResult = r;
   };
   setResult(LookupResult::NotFound);
+
+  // ---- RPD1 on-card dictionary path (/dict/dict.bin) ----
+  // Self-contained: rpd1store owns its PSRAM sparse index and I/O; it does not
+  // use StarDict's entryList/heap working set or sidecars. Plain UTF-8 output
+  // ('\n' separated) feeds the existing plain definition renderer unchanged.
+  if (rpd1Active_) {
+    char defBuf[rpd1store::kDefCap];
+    if (rpd1store::lookup(word, defBuf, sizeof(defBuf))) {
+      definitionOut = defBuf;
+      matchedHeadwordOut = cleanWord(word);
+      setResult(LookupResult::Found);
+      return true;
+    }
+    setResult(LookupResult::NotFound);
+    return false;
+  }
+
   // cleanWord plus three stem variants can retain five input-sized buffers,
   // including growth of a concatenated variant. Keep the viewer intact on OOM.
   const size_t wordBytes = word ? strlen(word) + 1 : 1;

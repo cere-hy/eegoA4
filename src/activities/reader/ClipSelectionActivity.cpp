@@ -29,8 +29,12 @@ namespace {
 constexpr int TOUCH_DRAG_MOVEMENT_PX = 4;
 constexpr unsigned long TOUCH_PAGE_ADVANCE_HOLD_MS = 1000;
 constexpr int TOUCH_PAGE_END_DWELL_SLOP_PX = 8;
-constexpr ClippingResult::Action SELECTION_ACTIONS[] = {ClippingResult::Action::Lookup, ClippingResult::Action::Clip,
-                                                        ClippingResult::Action::Bookmark};
+// Design-final v2: the two selection actions are the local dictionary (RPD1)
+// and AI (0x1A). Clip/Bookmark are retired (B2) and kept only to keep indices
+// stable for other modes. Slot 0 = Lookup, slot 1 = AiLookup.
+constexpr ClippingResult::Action SELECTION_ACTIONS[] = {
+    ClippingResult::Action::Lookup, ClippingResult::Action::AiLookup,
+    ClippingResult::Action::Clip, ClippingResult::Action::Bookmark};
 
 const char* cleanWordStart(const char* text) {
   if (!text) return "";
@@ -71,9 +75,12 @@ ClipSelectionActivity::ClipSelectionActivity(GfxRenderer& renderer, MappedInputM
 
 void ClipSelectionActivity::onEnter() {
   Activity::onEnter();
-  std::string dictionaryPath;
-  lookupAvailable =
-      mode == Mode::DefinitionLookup || DictionaryRegistry::resolveBasePath(SETTINGS.dictionaryName, dictionaryPath);
+  // Design-final v2: the on-card RPD1 dictionary (/dict/dict.bin) is an
+  // independent project asset and is always offered as the "dictionary" action,
+  // regardless of whether a StarDict folder is configured. A missing/corrupt
+  // dict.bin degrades to a "not found" popup at lookup time (never a crash), so
+  // the two real buttons (dictionary + AI) are always shown from slot 0.
+  lookupAvailable = true;
   fontId = SETTINGS.getReaderFontId();
   lineHeight = renderer.getLineHeight(fontId);
   const bool extracted = extractWords();

@@ -41,7 +41,8 @@ struct PageResult {
 };
 
 struct ClippingResult {
-  enum class Action : uint8_t { Clip, Lookup, Bookmark };
+  // AiLookup: fire 0x1A scene push (AI definition); Lookup: local RPD1 dictionary.
+  enum class Action : uint8_t { Clip, Lookup, Bookmark, AiLookup };
   Action action = Action::Clip;
   std::string text;
   uint16_t startPageOffset = 0;

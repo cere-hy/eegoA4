@@ -94,14 +94,16 @@ class Dictionary {
   // Resolve the dictionary folder and validate its files. Rejects
   // dictionaries with 64-bit index offsets (idxoffsetbits=64 in .ifo).
   bool open(const char* folderName);
-  bool isOpen() const { return !basePath.empty(); }
+  bool isOpen() const { return rpd1Active_ || !basePath.empty(); }
 
   // True when the .qidx sidecar (or the .sidx sidecar of a present .syn) is
   // missing or stale — call buildIndex() first so the UI can show an
   // "Indexing…" message for the slow first pass.
 
   // Declared HTML/XDXF and decoded inline fields use the EPUB rendering pipeline.
-  bool definitionsAreHtml() const { return htmlDefinitions; }
+  // RPD1 definitions are plain UTF-8 text ('\n' separated), rendered by the
+  // existing plain/MARKER path — never as HTML.
+  bool definitionsAreHtml() const { return !rpd1Active_ && htmlDefinitions; }
 
   bool needsIndex();
 
@@ -245,6 +247,13 @@ class Dictionary {
   bool hasSyn = false;  // a <stem>.syn synonym index exists next to the .idx
   bool htmlDefinitions = false;
   bool inlineTypes = false;
+
+  // RPD1 mode: when /dict/dict.bin is present and valid, lookups are served by
+  // the on-card RPD1 dictionary (lib/Rpd1Dict) instead of StarDict. The whole
+  // public interface keeps the same signatures: open()/lookup()/needsIndex()/
+  // buildIndex()/definitionsAreHtml() branch internally, so callers (the
+  // DictionaryWordSelect/Definition activities) need no changes at all.
+  bool rpd1Active_ = false;
 
   // The entry list of the current lookup. Allocated once when the dictionary
   // opens and reused by every lookup, so a lookup never allocates a container.

@@ -1037,7 +1037,9 @@ void BaseTheme::drawSelectionHandle(const GfxRenderer& renderer, const Rect rect
 void BaseTheme::drawSelectionActions(const GfxRenderer& renderer, const Rect rect, const int count,
                                      const int firstAction) {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const char* labels[] = {tr(STR_LOOKUP), tr(STR_IGNORE), tr(STR_IGNORE)};
+  // Design-final v2: two real actions — local dictionary lookup and AI (0x1A).
+  // "AI" is a universal token, deliberately not an i18n key (no translation needed).
+  const char* labels[] = {tr(STR_DICTIONARY), "AI", tr(STR_IGNORE)};
   for (int i = 0; i < count; ++i) {
     const Rect button = selectionGeometry::button(rect, i, metrics.menuSpacing, count);
     renderer.fillRoundedRect(button.x, button.y, button.width, button.height, metrics.controlRadius, Color::White);

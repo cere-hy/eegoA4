@@ -565,6 +565,24 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
       section->currentPage = endPage;
       currentPageVisibleOffset = section->getVisibleTextOffsetForPage(endPage);
     }
+    // Design-final v2: AI is an explicit second button. Only AiLookup fires the
+    // 0x1A scene push; the local dictionary (Lookup) never touches BLE.
+    if (clipping.action == ClippingResult::Action::AiLookup) {
+      auto page = section ? section->loadPage(section->currentPage) : nullptr;
+      std::string sceneCtx;
+      uint16_t wordOff = 0;
+      uint8_t flags = PSC_FLAG_SENTENCE_FALLBACK;
+      if (page && !buildSceneContext(page.get(), clipping.text, sceneCtx, wordOff)) {
+        flags = static_cast<uint8_t>(flags | PSC_FLAG_CTX_TRUNCATED);
+      }
+      LOG_INF("AI", "AI button tapped: word='%s' len=%u wordOff=%u -> 0x1A",
+              clipping.text.c_str(), (unsigned)clipping.text.size(), (unsigned)wordOff);
+      const int frames = scenepush::emitScene(clipping.text.data(), clipping.text.size(),
+                                              sceneCtx.data(), sceneCtx.size(), wordOff, flags);
+      LOG_INF("AI", "0x1A emit result frames=%d", frames);
+      requestUpdate();
+      return;
+    }
     if (clipping.action == ClippingResult::Action::Lookup) {
       auto page = section ? section->loadPage(section->currentPage) : nullptr;
       if (!page) {
@@ -572,19 +590,7 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
         requestUpdate();
         return;
       }
-      // B4′: fire-and-forget 0x1A scene push alongside the local lookup. The
-      // local dictionary path does NOT wait on BLE; emitScene() is a no-op when
-      // no subscribed phone is connected. Sentence boundary isn't derived here,
-      // so the page-line fallback flag is set (white-paper §2.1).
-      {
-        std::string sceneCtx;
-        uint16_t wordOff = 0;
-        const bool found = buildSceneContext(page.get(), clipping.text, sceneCtx, wordOff);
-        uint8_t flags = PSC_FLAG_SENTENCE_FALLBACK;
-        if (!found) flags = static_cast<uint8_t>(flags | PSC_FLAG_CTX_TRUNCATED);
-        scenepush::emitScene(clipping.text.data(), clipping.text.size(),
-                             sceneCtx.data(), sceneCtx.size(), wordOff, flags);
-      }
+      LOG_INF("DICT", "Dictionary button tapped: word='%s' (local RPD1 lookup)", clipping.text.c_str());
       int top, right, bottom, left;
       renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
       std::string chapter = chapterTitle;

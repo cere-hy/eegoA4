@@ -1,0 +1,10 @@
+{
+  "name": "Rpd1Dict",
+  "version": "1.0.0",
+  "description": "RPD1 on-card dictionary: verbatim pico format parser over thread-safe Storage. Fixed path /dict/dict.bin.",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  },
+  "headers": ["Rpd1Storage.h", "rpd1_core.h"]
+}
