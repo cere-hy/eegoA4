@@ -39,7 +39,8 @@
 | B3 | BLE 连接层 | **完成 + 真机通过 + 点核闭环（v1.7）**：peripheral GATT 推文服务（PicoPush 全局广播 + WWR 三特征 + MTU 247）+ 被动蓝牙状态栏图标 + 一射频一主人排他闸；双冷编 app/factory 同 sha（A 级闭合）；commit `4ad75499`。真机（11-17 哨位）：翻书流畅/蓝牙好/图标在位；`PicoPush-424C`、MTU=247、5f13 订阅成功；`reason=531`=APK 双按钮互斥通道切换（公主补充精化，非缺陷）。点核增量：协议行为档案立档（§7.5）、B6.5 收 RESUME 必需 + 通道切换断流防冲突、token 口径中性化。详见回执 §七/§八 | `B3_BLE连接层回执.md` |
 | B4a | 0x1A 编码器 | **完成（纯 host 逻辑核批）**：白皮书 §2.1 权威布局 0x1A scene 编码器（lib/PushSceneCodec，241B 定长/零填充/UTF-8 边界/首帧元数据 4+wl）；host 五向量断言 248 checks/0 red（28B→1帧/payload36、300B→2、1024B→5、空词拒、199B 截 63）；B3 实现 commit `4ad75499` revert 临时 worktree 实跑零冲突。commit `94167d18`（5 文件/+467）。本批不出固件件。MAC 原文勘误 v1.7.1 + 副本非原件归档随本批入档 | `B4a_0x1A编码器回执.md` |
 | B4′ | 0x1A 接线（B4 固件半） | **完成 + A 级闭合**：点核 v1.8 裁定接线是 B4 本体变量不可推 B11，立本补批。ScenePush 桥接（查词→codec→STATUS 5f13 notify）+ CCCD 订阅闸 + 阅读页 onEnter/onExit 注册注销回调不停广播 + 互不等待双路；LDF 自动链入（ELF 符号实证非空壳）。commit `c2ef4338`（8 文件/+223）。双冷编 app `f39b5e5a…`/factory `edda4500…` 同 sha、epoch `1794813449`、delta 65536。交付件 `crosspoint_eegoA4_b4-20261117-c2ef4338_factory.bin`。真机仅剩「APK 收 0x1A 弹卡」归 B11 | `B4prime_0x1A接线回执.md` |
-| B5–B11 | — | 未开始（下一批 B5=§3.3 0x07 单帧接收） | — |
+| B5 | 0x07 单帧接收 | **完成 + A 级闭合（v1.9 放行）**：白皮书 §2.2 权威偏移硬解（带头/裸帧双接）+ 扫可打印段交叉校验（不一致 hex 留证告警）+ `dn=170` 拒收；双槽 + per-slot seqlock 原子代际号（BLE 写/main-loop 读不撕裂，host pthread 2 万帧并发零撕裂、代际单调）；CTRL 0x07 专用 `AiResultHandler` hook（与 B6.5 推文 CtrlHandler 分离）+ 全局常驻 + 主循环 pump；上屏追加重排→跳末页、失败回滚；241B hex 三连留证。host 36 checks/0 red。commit `6820763e`（8 文件）。双冷编 app `ef368c53…`/factory `e138e41e…` 同 sha、epoch `1794813449`、delta 65536。交付件 `crosspoint_eegoA4_b5-20261117-6820763e_factory.bin`。真机可见项（追加/跳末页/回滚）以 s11 oracle 归 B11 | `B5_0x07接收回执.md` |
+| B6–B11 | — | 未开始（下一批 B6=§3.4 0x08 多帧，判别令降级为查词释义全量专用） | — |
 
 ## B2 指纹（本批基线）
 
