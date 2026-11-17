@@ -1083,12 +1083,10 @@ void ClipSelectionActivity::drawDefinitionCard() const {
       break;
     }
     case CardState::AiPending: {
-      // AI-wire: reuse the "Looking…" draw path; Chinese glyphs need prewarm on
-      // SD-card fonts (same mask as the definition viewer).
-      if (renderer.isSdCardFont(font)) {
-        renderer.ensureSdCardFontReady(font, "AI 查询中…", 0x03);
-      }
-      renderer.drawText(font, textX, textY, "AI 查询中…", true, EpdFontFamily::REGULAR);
+      // Ruling: ASCII-only to avoid any CJK glyph dependency. A prewarm call
+      // cannot help if a stripped SD-card font lacks the glyphs entirely —
+      // "AI..." is always renderable on every font, never blank/tofu.
+      renderer.drawText(font, textX, textY, "AI...", true, EpdFontFamily::REGULAR);
       break;
     }
     case CardState::Ready: {
