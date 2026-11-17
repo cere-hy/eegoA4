@@ -35,8 +35,9 @@
 |---|---|---|---|
 | B0 | 计划 | 完成（v1.6 权威白皮书校准） | `/workspace/REBUILD_MASTER_PLAN.md` |
 | B1 | 底座构建 | **完成**：双冷编同 sha256 `db72df14...`，双源 factory `2c72f26e...`，selfcheck PASS；commit `993c4e63` | `docs/rebuild/B1_底座构建回执.md` |
-| B2 | S8 裁剪 | **完成**：30 删/5 保留/17 引用清理 + i18n 23 键；strings 四计数全 0；双冷编 app/factory 同 sha（A 级闭合）；commit `704912a1` | `docs/rebuild/B2_裁剪回执.md` + `B2_路径普查报告.md` |
-| B3–B11 | — | 未开始 | — |
+| B2 | S8 裁剪 | **完成**：30 删/5 保留/17 引用清理 + i18n 23 键；strings 四计数全 0；双冷编 app/factory 同 sha（A 级闭合）；commit `704912a1`（+ i18n 补行 `8e34ed38`） | `docs/rebuild/B2_裁剪回执.md` + `B2_路径普查报告.md` |
+| B3 | BLE 连接层 | **完成**：peripheral GATT 推文服务（PicoPush 全局广播 + WWR 三特征 + MTU 247）+ 被动蓝牙状态栏图标 + 一射频一主人排他闸；双冷编 app/factory 同 sha（A 级闭合）；commit `4ad75499` | `B3_BLE连接层回执.md` |
+| B4–B11 | — | 未开始 | — |
 
 ## B2 指纹（本批基线）
 
@@ -45,7 +46,16 @@
 - 双冷编（clean + 空缓存 + epoch 锚 `490813ff`）app/factory 两次同 sha，selfcheck PASS（A 级形式闭合，见点核 §四）
 - strings 四计数：clipping=0 / Clippings=0 / My Clippings=0 / Bookmark=0 ✓
 - 回滚点：git tag `b1-baseline` + `rebuild/b2_backup/`（29MB）
-- 交付刷机包：`/workspace/crosspoint_eegoA4_b2-704912a1-20261117-704912a1_factory.bin`（底座裁剪件，仍非日常用件）
+- 交付刷机包：`/workspace/crosspoint_eegoA4_b2-20261117-704912a1_factory.bin`（三段式整改后命名，sha 不变；底座裁剪件，仍非日常用件）
+
+## B3 指纹（本批基线）
+
+- commit `4ad75499`（6 文件 / +340 / −7）；前一干净基线 `8e34ed38`
+- app sha256 `38ebe92315b1271cd13329c4bfeb65e13eca01846f6855c1538f3650034139b4`（5,374,912 B，较 B2 +4,160 B = BLE 连接层净增）
+- factory sha256 `7402f16935c52240d5b71e9198d60447315876ff6d3d8b2d75a70a492a45c458`（5,440,448 B；factory−app=65,536）
+- 双冷编（clean + 清 .cache + epoch 锚 `490813ff`=1794813449，无管道 source + 断言）app/factory 两次同 sha，selfcheck PASS（A 级形式闭合，见 B3 回执 §五）
+- 关键能力：`PicoPush-%04X`（token=Wi-Fi STA MAC `mac[4]<<8|mac[5]`）全局长驻广播；GATT 服务 `e2f5…5f10` + DATA(5f11)/CTRL(5f12) WWR + STATUS(5f13) READ\|NOTIFY；MTU 247 无 bond；`g_bleConnected`/`g_bleReceiving` 原子标志；状态栏被动蓝牙图标（禁角标/闪烁）
+- 交付刷机包：`/workspace/crosspoint_eegoA4_b3-20261117-4ad75499_factory.bin`（BLE 连接层验证件，仍非日常用件）
 
 ## B1 验证补记（含点核裁定）
 
