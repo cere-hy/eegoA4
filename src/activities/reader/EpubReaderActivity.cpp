@@ -2342,18 +2342,13 @@ void EpubReaderActivity::renderStatusBar() const {
   GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, false,
                     section ? section->isBuilding() : false);
 
-  // diag-mtu (temporary, ASCII-only): paint the negotiated ATT MTU as a small
-  // fixed line in the bottom-left, just above the status bar (inside the page
-  // margin whitespace) so it never overlaps battery/BLE/title/progress. Refreshed
-  // on every status-bar paint and on MTU change (see loop()). No CJK glyphs.
+  // diag-mtu (temporary, ASCII-only): fixed bottom-left MTU line at x=10,
+  // y=screenHeight-10. Overlap with other elements is acceptable by design;
+  // visibility of the number is the only goal. No CJK glyphs.
   {
-    int t = 0, r = 0, b = 0, l = 0;
-    renderer.getOrientedViewableTRBL(&t, &r, &b, &l);
-    const int lineH = renderer.getLineHeight(SMALL_FONT_ID);
-    const int y = renderer.getScreenHeight() - b - UITheme::getReaderStatusBarHeight() - lineH;
     char mtuLine[24];
     snprintf(mtuLine, sizeof(mtuLine), "MTU=%u", (unsigned)blepushgatt::status().mtu);
-    renderer.drawText(SMALL_FONT_ID, l + 2, y, mtuLine, true, EpdFontFamily::REGULAR);
+    renderer.drawText(SMALL_FONT_ID, 10, renderer.getScreenHeight() - 10, mtuLine, true, EpdFontFamily::REGULAR);
   }
 }
 
