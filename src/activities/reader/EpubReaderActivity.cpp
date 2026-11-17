@@ -1,6 +1,7 @@
 #include "EpubReaderActivity.h"
 
 #include <BlePageTurner.h>
+#include <BlePushGatt.h>  // diag-mtu: negotiated MTU for the footer ASCII line
 #include <ScenePush.h>  // B4′: long-press → 0x1A scene notify
 #include <push_scene.h>  // B4′: PSC_CTX_MAX from white-paper §2.1 (no hardcoding)
 #include <Epub/Page.h>
@@ -763,6 +764,16 @@ void EpubReaderActivity::loop() {
   {
     RenderLock lock(RenderLock::Mode::Try);
     if (lock.ownsLock() && linkNoteTitle.repaint(bleturner::linkNote())) requestUpdate();
+  }
+
+  // diag-mtu (temporary): the negotiated MTU can arrive after the first page was
+  // painted. Repaint once when it changes so the footer "MTU=xxx" line is live.
+  {
+    const uint16_t mtu = blepushgatt::status().mtu;
+    if (mtu != lastShownMtu) {
+      lastShownMtu = mtu;
+      requestUpdate();
+    }
   }
 
   // Someone else turned the screen while this reader was stacked (the control
@@ -2330,6 +2341,20 @@ void EpubReaderActivity::renderStatusBar() const {
 
   GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, false,
                     section ? section->isBuilding() : false);
+
+  // diag-mtu (temporary, ASCII-only): paint the negotiated ATT MTU as a small
+  // fixed line in the bottom-left, just above the status bar (inside the page
+  // margin whitespace) so it never overlaps battery/BLE/title/progress. Refreshed
+  // on every status-bar paint and on MTU change (see loop()). No CJK glyphs.
+  {
+    int t = 0, r = 0, b = 0, l = 0;
+    renderer.getOrientedViewableTRBL(&t, &r, &b, &l);
+    const int lineH = renderer.getLineHeight(SMALL_FONT_ID);
+    const int y = renderer.getScreenHeight() - b - UITheme::getReaderStatusBarHeight() - lineH;
+    char mtuLine[24];
+    snprintf(mtuLine, sizeof(mtuLine), "MTU=%u", (unsigned)blepushgatt::status().mtu);
+    renderer.drawText(SMALL_FONT_ID, l + 2, y, mtuLine, true, EpdFontFamily::REGULAR);
+  }
 }
 
 // ---------------------------------------------------------------------------

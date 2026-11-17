@@ -505,6 +505,12 @@ void ClipSelectionActivity::loop() {
     runCardLookup();
     return;
   }
+  // diag-mtu (temporary): clear an expired rejection notice and repaint once so
+  // the card returns to its real state (local definition / not-found).
+  if (!cardNotice_.empty() && millis() >= aiFeedbackUntil_) {
+    cardNotice_.clear();
+    requestUpdate();
+  }
   // AI-wire: while waiting for the 0x07 answer, poll the receive sink on the
   // main loop (no render lock). main.cpp already calls aireceivesink::pump()
   // every iteration; here we only read the decoded result / enforce timeout.
@@ -880,6 +886,7 @@ void ClipSelectionActivity::resetCard() {
   cardLocalHeadword_.clear();
   cardHasLocalDef_ = false;
   aiWaiting_ = false;
+  cardNotice_.clear();
 }
 
 void ClipSelectionActivity::beginCardLookup() {
@@ -987,6 +994,22 @@ int ClipSelectionActivity::aiButtonAt(const int x, const int y) const {
 // whose own log already carries opcode/payload/frames/word/wordOffset/result.
 void ClipSelectionActivity::beginAiQuery() {
   if (aiWaiting_ || cardWord_.empty()) return;
+
+  // diag-mtu (temporary guard): bit2 whole-passage is NOT implemented yet —
+  // today the whole selection is stuffed into `word` and clamped to 63 B, which
+  // emits a malformed frame. Reject any multi-word selection with a short ASCII
+  // notice and send nothing, so diagnostics are not polluted. Single-word AI is
+  // unaffected. Formal bit2 lands in a later batch.
+  const bool multiWord = cardWord_.find_first_of(" \t\r\n") != std::string::npos;
+  if (multiWord) {
+    LOG_INF("AI", "AI query rejected: multi-word selection (%u bytes), bit2 not implemented",
+            (unsigned)cardWord_.size());
+    cardNotice_ = "AI: one word only";
+    aiFeedbackUntil_ = millis() + AI_FEEDBACK_MS;
+    requestUpdate();
+    return;
+  }
+
   if (!aiSendHandler_) {
     LOG_ERR("AI", "AI button tapped but no send handler injected");
     aiFeedbackUntil_ = millis() + AI_FEEDBACK_MS;
@@ -1077,6 +1100,12 @@ void ClipSelectionActivity::drawDefinitionCard() const {
   const int textY = card.y + padding;
   const int textW = std::max(16, ai.x - padding - textX);
 
+  // diag-mtu (temporary): a rejection notice overrides the card text area for a
+  // few seconds; the state machine and local definition are left untouched.
+  const bool showNotice = !cardNotice_.empty() && millis() < aiFeedbackUntil_;
+  if (showNotice) {
+    renderer.drawText(font, textX, textY, cardNotice_.c_str(), true, EpdFontFamily::REGULAR);
+  } else {
   switch (cardState_) {
     case CardState::Looking: {
       renderer.drawText(font, textX, textY, tr(STR_DICT_LOOKING_UP), true, EpdFontFamily::REGULAR);
@@ -1129,6 +1158,7 @@ void ClipSelectionActivity::drawDefinitionCard() const {
     default:
       break;
   }
+  }  // diag-mtu notice else
 
   // AI button: busy (inverted) for the whole AiPending window, plus a short
   // click ack. The button is now live — it fires 0x1A and waits for 0x07.

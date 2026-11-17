@@ -146,6 +146,9 @@ class ClipSelectionActivity final : public Activity {
   std::string cardHeadword_;
   bool cardLookupPending_ = false;
   unsigned long aiFeedbackUntil_ = 0;
+  // diag-mtu (temporary): short ASCII notice shown in the card text area for a
+  // few seconds (e.g. multi-word selection rejected). Empty = no notice.
+  std::string cardNotice_;
   // AI-wire batch: keep the local definition so a timeout/failed AI query can
   // always fall back to it (never a blank card).
   std::string cardLocalDefinition_;

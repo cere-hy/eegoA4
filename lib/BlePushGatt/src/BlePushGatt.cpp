@@ -224,14 +224,36 @@ bool canNotifyScene() {
 }
 
 bool sendSceneFrame(const uint8_t* frame, size_t len) {
-  // One 0x1A frame is 241 B (< MTU 247 payload), so a single notify always fits.
+  // diag-mtu: a 0x1A frame is 241 B. NimBLE 2.5.1 silently truncates an ATT
+  // notify to (MTU-3) in ble_att_truncate_to_mtu() and still returns success —
+  // so "notify() returned true" used to masquerade as "frame delivered whole".
+  // Self-check BEFORE sending: if the frame cannot fit the negotiated MTU,
+  // refuse (return false) and shout, never claim success. This is a bug fix,
+  // not a protocol change: frame/flags/notify characteristic are untouched.
   constexpr size_t kSceneFrameMax = 241;
   if (!canNotifyScene() || frame == nullptr || len == 0 || len > kSceneFrameMax) return false;
-  // setValue copies into the characteristic; notify is fire-and-forget — the
-  // local dictionary lookup path never blocks on this. MTU 247 always fits one
-  // 241-byte frame, so no fragmentation is needed here.
+
+  const uint16_t mtu = s_status.mtu;
+  const size_t capacity = (mtu > 3) ? (static_cast<size_t>(mtu) - 3u) : 0u;
+  const size_t wire = (len < capacity) ? len : capacity;  // = min(len, mtu-3)
+
+  // (4) wire bytes actually handed to ATT vs min(len, mtu-3).
+  log("scene notify len=%u wire=%u cap=%u mtu=%u",
+      (unsigned)len, (unsigned)wire, (unsigned)capacity, (unsigned)mtu);
+
+  // (5) truncation warning + MTU self-check: refuse instead of pretending success.
+  if (len > capacity) {
+    log("WARN scene notify MTU TOO SMALL len=%u cap=%u mtu=%u -> REFUSED",
+        (unsigned)len, (unsigned)capacity, (unsigned)mtu);
+    return false;
+  }
+
   s_statusChr->setValue(const_cast<uint8_t*>(frame), len);
-  s_statusChr->notify();
+  // (6) failure warning: notify() returning false is now visible on the console.
+  if (!s_statusChr->notify()) {
+    log("WARN scene notify failed len=%u mtu=%u", (unsigned)len, (unsigned)mtu);
+    return false;
+  }
   return true;
 }
 

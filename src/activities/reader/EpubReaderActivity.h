@@ -161,6 +161,9 @@ class EpubReaderActivity final : public ReaderActivity {
   bool inputOverPage() const override { return overlay != Overlay::None || ReaderActivity::inputOverPage(); }
   // "Connecting Bluetooth…" or "Bluetooth failed" in place of the status bar title.
   mutable LinkNoteTitle linkNoteTitle;
+  // diag-mtu (temporary): last MTU value painted in the footer. A change in the
+  // negotiated MTU triggers one repaint so the ASCII "MTU=xxx" line updates live.
+  uint16_t lastShownMtu = 0xFFFF;
   static constexpr size_t RENDER_MIN_FREE_HEAP = 24 * 1024;
   static constexpr int PARTIAL_REBUILD_START_MARGIN = 15;
   static constexpr int BUILD_POPUP_PAGE_THRESHOLD = 20;
