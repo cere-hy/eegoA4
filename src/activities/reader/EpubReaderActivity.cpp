@@ -1,6 +1,8 @@
 #include "EpubReaderActivity.h"
 
 #include <BlePageTurner.h>
+#include <ScenePush.h>  // B4′: long-press → 0x1A scene notify
+#include <push_scene.h>  // B4′: PSC_CTX_MAX from white-paper §2.1 (no hardcoding)
 #include <Epub/Page.h>
 #include <Epub/blocks/TextBlock.h>
 #include <FontCacheManager.h>
@@ -159,9 +161,52 @@ ClipSelectionActivity::Selection lookupReturnSelectionFor(const ClippingResult& 
   return {0, 0, clipping.startWordIndex, clipping.endWordIndex, true};
 }
 
+// B4′: build the 0x1A scene context from the current page's visible text.
+// White-paper §2.1 allows a page-line fallback when a sentence boundary is not
+// available; we join the page's words with spaces so byte offsets stay UTF-8
+// aligned. `wordOff` is the byte offset of `word` in the joined context.
+// Returns false when the word is not found (caller then sends with wordOff=0).
+bool buildSceneContext(const Page* page, const std::string& word,
+                       std::string& ctx, uint16_t& wordOff) {
+  if (!page) return false;
+  ctx.clear();
+  ctx.reserve(PSC_CTX_MAX);
+  for (const auto& el : page->elements) {
+    if (el->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(el.get());
+    const auto* block = line ? line->getBlock() : nullptr;
+    if (!block || !block->valid()) continue;
+    for (uint16_t i = 0; i < block->wordCount(); ++i) {
+      if (!ctx.empty()) ctx.push_back(' ');
+      ctx.append(block->wordText(i), block->wordTextLen(i));
+      if (ctx.size() >= PSC_CTX_MAX) break;
+    }
+    if (ctx.size() >= PSC_CTX_MAX) break;
+  }
+  if (ctx.empty()) return false;
+  const size_t at = ctx.find(word);
+  wordOff = (at == std::string::npos) ? 0 : static_cast<uint16_t>(at);
+  return at != std::string::npos;
+}
+
 }  // namespace
 
+// B4′ — 0x1A scene emitter lifecycle. Registration follows the reader page;
+// the B3 persistent advertising is untouched (unregister stops emission, not
+// the radio). v1.3 "退出阅读页只注销回调、不停广播".
+void EpubReaderActivity::onEnter() {
+  ReaderActivity::onEnter();
+  scenepush::registerEmitter();
+}
+
+void EpubReaderActivity::onExit() {
+  scenepush::unregisterEmitter();
+  ReaderActivity::onExit();
+}
+
 EpubReaderActivity::~EpubReaderActivity() {
+  // Defensive: cover any destruction path that bypasses onExit.
+  scenepush::unregisterEmitter();
   ImageBlock::setExtractor(nullptr, nullptr);
   // ActivityManager destroys activities with its RenderLock already held;
   // taking another here self-deadlocks (renderingMutex is non-recursive).
@@ -526,6 +571,19 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
         LOG_ERR("CLIP", "Failed to load lookup page");
         requestUpdate();
         return;
+      }
+      // B4′: fire-and-forget 0x1A scene push alongside the local lookup. The
+      // local dictionary path does NOT wait on BLE; emitScene() is a no-op when
+      // no subscribed phone is connected. Sentence boundary isn't derived here,
+      // so the page-line fallback flag is set (white-paper §2.1).
+      {
+        std::string sceneCtx;
+        uint16_t wordOff = 0;
+        const bool found = buildSceneContext(page.get(), clipping.text, sceneCtx, wordOff);
+        uint8_t flags = PSC_FLAG_SENTENCE_FALLBACK;
+        if (!found) flags = static_cast<uint8_t>(flags | PSC_FLAG_CTX_TRUNCATED);
+        scenepush::emitScene(clipping.text.data(), clipping.text.size(),
+                             sceneCtx.data(), sceneCtx.size(), wordOff, flags);
       }
       int top, right, bottom, left;
       renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);

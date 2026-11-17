@@ -244,6 +244,8 @@ class EpubReaderActivity final : public ReaderActivity {
       : ReaderActivity("EpubReader", renderer, mappedInput, std::move(bookPath), allowFastInitialRefresh) {}
   ~EpubReaderActivity() override;
 
+  void onEnter() override;   // B4′: register 0x1A scene emitter (radio stays with B3)
+  void onExit() override;    // B4′: unregister emitter; NEVER stop advertising
   void loop() override;
   void render(RenderLock&& lock) override;
 

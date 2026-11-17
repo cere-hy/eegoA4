@@ -62,4 +62,11 @@ void setCtrlHandler(CtrlHandler h);
 // central must refuse to start in that window (§7 connection exclusivity).
 bool radioOwned();
 
+// B4′: push one already-encoded 0x1A scene frame up the STATUS(..13) NOTIFY
+// characteristic. No-op (returns false) when no phone link is up or the client
+// has not subscribed to the CCCD — the local dictionary lookup never waits on
+// this. The caller owns the frame buffer; notify is fire-and-forget.
+bool sendSceneFrame(const uint8_t* frame, size_t len);
+bool canNotifyScene();
+
 }  // namespace blepushgatt

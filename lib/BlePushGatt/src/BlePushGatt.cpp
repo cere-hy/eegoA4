@@ -39,6 +39,7 @@ NimBLEServer* s_server = nullptr;
 NimBLECharacteristic* s_data = nullptr;
 NimBLECharacteristic* s_ctrl = nullptr;
 NimBLECharacteristic* s_statusChr = nullptr;
+std::atomic<bool> s_statusSubscribed{false};  // B4′: STATUS CCCD subscribed by peer
 
 void log(const char* fmt, ...);
 void startAdvertising();
@@ -60,6 +61,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int reason) override {
     g_bleConnected.store(false, std::memory_order_release);
     g_bleReceiving.store(false, std::memory_order_release);  // never leave the flag stuck at 1
+    s_statusSubscribed.store(false, std::memory_order_release);  // B4′: CCCD dies with the link
     log("disconnected reason=%d", reason);
     // Re-arm the always-on advertisement after the link drops.
     startAdvertising();
@@ -93,6 +95,17 @@ class DataCallbacks : public NimBLECharacteristicCallbacks {
     if (s_dataHandler) {
       s_dataHandler(reinterpret_cast<const uint8_t*>(v.data()), v.size());
     }
+  }
+};
+
+// B4′: track the STATUS CCCD so fire-and-forget scene notify never fires into a
+// void (or throws when the peer has not subscribed). Mirrors the ACK/notify
+// subscription gate in the pico reference.
+class StatusCallbacks : public NimBLECharacteristicCallbacks {
+  void onSubscribe(NimBLECharacteristic*, NimBLEConnInfo&, uint16_t subValue) override {
+    const bool subscribed = (subValue & 0x0001u) != 0;
+    s_statusSubscribed.store(subscribed, std::memory_order_release);
+    log("STATUS cccd sub=%u", static_cast<unsigned>(subscribed));
   }
 };
 
@@ -168,6 +181,7 @@ bool begin() {
       kStatusUuid, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
   s_data->setCallbacks(new DataCallbacks());
   s_ctrl->setCallbacks(new CtrlCallbacks());
+  s_statusChr->setCallbacks(new StatusCallbacks());  // B4′: CCCD subscription gate
 
   s_status.initialized = true;
   s_status.mtu = NimBLEDevice::getMTU();
@@ -193,6 +207,24 @@ void setDataHandler(DataHandler h) { s_dataHandler = h; }
 void setCtrlHandler(CtrlHandler h) { s_ctrlHandler = h; }
 bool radioOwned() { return s_status.initialized; }
 
+bool canNotifyScene() {
+  return s_statusChr != nullptr && s_status.initialized &&
+         g_bleConnected.load(std::memory_order_acquire) &&
+         s_statusSubscribed.load(std::memory_order_acquire);
+}
+
+bool sendSceneFrame(const uint8_t* frame, size_t len) {
+  // One 0x1A frame is 241 B (< MTU 247 payload), so a single notify always fits.
+  constexpr size_t kSceneFrameMax = 241;
+  if (!canNotifyScene() || frame == nullptr || len == 0 || len > kSceneFrameMax) return false;
+  // setValue copies into the characteristic; notify is fire-and-forget — the
+  // local dictionary lookup path never blocks on this. MTU 247 always fits one
+  // 241-byte frame, so no fragmentation is needed here.
+  s_statusChr->setValue(const_cast<uint8_t*>(frame), len);
+  s_statusChr->notify();
+  return true;
+}
+
 }  // namespace blepushgatt
 
 #else  // non-EEGO-A4 or peripheral role disabled: inert stubs
@@ -212,6 +244,8 @@ uint16_t tokenFromStaMac() { return 0; }
 void setDataHandler(DataHandler) {}
 void setCtrlHandler(CtrlHandler) {}
 bool radioOwned() { return false; }
+bool sendSceneFrame(const uint8_t*, size_t) { return false; }
+bool canNotifyScene() { return false; }
 }  // namespace blepushgatt
 
 #endif

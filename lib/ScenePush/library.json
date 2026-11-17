@@ -1,0 +1,13 @@
+{
+  "name": "ScenePush",
+  "version": "0.1.0",
+  "description": "B4′ 0x1A scene-frame send glue: long-press lookup → PushSceneCodec → BLE STATUS notify",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  },
+  "dependencies": {
+    "BlePushGatt": "*",
+    "PushSceneCodec": "*"
+  }
+}
