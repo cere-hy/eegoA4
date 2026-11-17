@@ -23,6 +23,9 @@ std::atomic<uint32_t> g_received{0};
 // Latest accepted frame headword + generation, guarded by main-loop-only
 // access in pump()/latest() (both run on the loop task; no cross-thread read).
 char g_headword[PAR_WORD_SLOT] = {};
+// B11: latest single-frame def (mirrors g_headword) — kept separate from the
+// accumulating g_screen.text so the inline card can show exactly one answer.
+char g_lastDef[PAR_DEF_SLOT] = {};
 
 void logf(const char* fmt, ...) {
   char line[192];
@@ -124,6 +127,7 @@ bool pump() {
   if (committed) {
     g_stats.reflowed++;                          // append/reflow ok → UI jumps last page
     std::snprintf(g_headword, sizeof(g_headword), "%s", r.word);
+    std::snprintf(g_lastDef, sizeof(g_lastDef), "%s", r.def);  // B11 single-frame mirror
   } else {
     g_stats.rollbacks++;                          // reflow failed → kept last good text
   }
@@ -140,6 +144,20 @@ bool latest(char* word, size_t wordCap, char* text, size_t textCap,
     const size_t n = g_screen.text_len < textCap - 1u ? g_screen.text_len : textCap - 1u;
     std::memcpy(text, g_screen.text, n);
     text[n] = '\0';
+  }
+  return g_screen.last_gen != 0;
+}
+
+bool latestFrame(char* word, size_t wordCap, char* def, size_t defCap,
+                 uint32_t* generation) {
+  if (generation != nullptr) *generation = g_screen.last_gen;
+  if (word != nullptr && wordCap > 0) {
+    std::snprintf(word, wordCap, "%s", g_headword);
+  }
+  if (def != nullptr && defCap > 0) {
+    const size_t n = std::strlen(g_lastDef) < defCap - 1u ? std::strlen(g_lastDef) : defCap - 1u;
+    std::memcpy(def, g_lastDef, n);
+    def[n] = '\0';
   }
   return g_screen.last_gen != 0;
 }

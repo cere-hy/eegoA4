@@ -1,6 +1,7 @@
 #include "ClipSelectionActivity.h"
 
 #include <Arduino.h>
+#include <AiResultSink.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalMemory.h>
@@ -43,6 +44,10 @@ constexpr ClippingResult::Action SELECTION_ACTIONS[] = {
 // no in-card paging — see RPD1 card design receipt §1).
 constexpr int CARD_MAX_DEF_LINES = 4;
 constexpr unsigned long AI_FEEDBACK_MS = 1200;
+// AI-wire: max time the card waits for a 0x07 result before it restores the
+// cached local definition. Cloud AI round-trips are typically a few seconds;
+// 15 s is a hard ceiling so the card can never hang blank (user requirement).
+constexpr unsigned long AI_QUERY_TIMEOUT_MS = 15000UL;
 
 const char* cleanWordStart(const char* text) {
   if (!text) return "";
@@ -500,6 +505,13 @@ void ClipSelectionActivity::loop() {
     runCardLookup();
     return;
   }
+  // AI-wire: while waiting for the 0x07 answer, poll the receive sink on the
+  // main loop (no render lock). main.cpp already calls aireceivesink::pump()
+  // every iteration; here we only read the decoded result / enforce timeout.
+  if (aiWaiting_) {
+    pollAiResult();
+    return;
+  }
   if (wordCount == 0 && !actionPopup.isActive()) {
     cancel();
     return;
@@ -528,14 +540,12 @@ void ClipSelectionActivity::loop() {
   }
   if (!touchDragSelecting && mappedInput.wasScreenTapped(touchX, touchY)) {
     if (rangeStart >= 0) {
-      // Design-correct v3: the definition card owns the popup region. Its left
-      // text area is inert (not a button, never cancels); only the right AI
-      // button is clickable and this batch it just gives a visual ack — no 0x1A.
+      // AI-wire: the definition card owns the popup region. Its left text area
+      // is inert (not a button, never cancels); only the right AI button is
+      // clickable — it now fires the real 0x1A scene push and waits for 0x07.
       if (cardState_ != CardState::Hidden) {
         if (aiButtonAt(touchX, touchY) == 0) {
-          aiFeedbackUntil_ = millis() + AI_FEEDBACK_MS;
-          LOG_INF("AI", "AI button ack (placeholder, no 0x1A this batch)");
-          requestUpdate();
+          beginAiQuery();
           return;
         }
         if (selectionGeometry::contains(cardRect(), touchX, touchY)) return;  // left area inert
@@ -866,6 +876,10 @@ void ClipSelectionActivity::resetCard() {
   cardDefinition_.clear();
   cardHeadword_.clear();
   cardLookupPending_ = false;
+  cardLocalDefinition_.clear();
+  cardLocalHeadword_.clear();
+  cardHasLocalDef_ = false;
+  aiWaiting_ = false;
 }
 
 void ClipSelectionActivity::beginCardLookup() {
@@ -907,9 +921,14 @@ void ClipSelectionActivity::runCardLookup() {
     cardDefinition_ = std::move(def);
     cardHeadword_ = std::move(head);
     cardState_ = CardState::Ready;
+    // AI-wire: cache the local result so an AI timeout/failure can restore it.
+    cardLocalDefinition_ = cardDefinition_;
+    cardLocalHeadword_ = cardHeadword_;
+    cardHasLocalDef_ = true;
     LOG_INF("DICT", "card lookup HIT word='%s' head='%s' bytes=%u in %lums", cardWord_.c_str(),
             cardHeadword_.c_str(), (unsigned)cardDefinition_.size(), lookupMs);
   } else {
+    cardHasLocalDef_ = false;
     cardState_ = CardState::NotFound;
     LOG_INF("DICT", "card lookup MISS word='%s' in %lums", cardWord_.c_str(), lookupMs);
   }
@@ -963,6 +982,84 @@ int ClipSelectionActivity::aiButtonAt(const int x, const int y) const {
   return selectionGeometry::contains(ai, x, y) ? 0 : -1;
 }
 
+// AI-wire: fire the real 0x1A scene push for the selected word. The host-injected
+// handler owns the page context (ctx/wordOff) and calls scenepush::emitScene(),
+// whose own log already carries opcode/payload/frames/word/wordOffset/result.
+void ClipSelectionActivity::beginAiQuery() {
+  if (aiWaiting_ || cardWord_.empty()) return;
+  if (!aiSendHandler_) {
+    LOG_ERR("AI", "AI button tapped but no send handler injected");
+    aiFeedbackUntil_ = millis() + AI_FEEDBACK_MS;
+    requestUpdate();
+    return;
+  }
+  const int frames = aiSendHandler_(cardWord_.c_str(), cardWord_.size());
+  if (frames <= 0) {
+    // Gated (no peer / not registered): nothing will come back — don't hang.
+    LOG_INF("AI", "card AI gated frames=0 -> keep local def, no wait");
+    aiFeedbackUntil_ = millis() + AI_FEEDBACK_MS;
+    requestUpdate();
+    return;
+  }
+  // Snapshot the last committed generation; only a STRICTLY NEWER one counts
+  // as this query's answer (generation advances after decode+screen-apply, so
+  // there is no publish/pump race and no stale-frame false positive).
+  uint32_t baseGen = 0;
+  aireceivesink::latestFrame(nullptr, 0, nullptr, 0, &baseGen);
+  aiWaitBaseGen_ = baseGen;
+  aiQueryStartMs_ = millis();
+  aiWaiting_ = true;
+  cardState_ = CardState::AiPending;
+  aiFeedbackUntil_ = millis() + AI_FEEDBACK_MS;
+  LOG_INF("AI", "card AI query sent frames=%d baseGen=%u -> AiPending (timeout=%lums)",
+          frames, baseGen, AI_QUERY_TIMEOUT_MS);
+  requestUpdate();
+}
+
+// AI-wire: called from loop() while aiWaiting_. main.cpp's aireceivesink::pump()
+// already decoded any fresh 0x07 into the ring; we read the single-frame answer
+// and replace the card body. A strictly newer generation is the ceiling guard;
+// the timeout guarantees the card can never stay blank/stuck.
+void ClipSelectionActivity::pollAiResult() {
+  char word[64] = {};
+  char def[512] = {};
+  uint32_t generation = aiWaitBaseGen_;
+  // Use latestFrame() (single 0x07 answer), NOT latest() which returns the
+  // append/reflow history — the card replaces its body with exactly one def.
+  if (aireceivesink::latestFrame(word, sizeof(word), def, sizeof(def), &generation) &&
+      generation > aiWaitBaseGen_) {
+    const unsigned long elapsed = millis() - aiQueryStartMs_;
+    cardDefinition_ = def;
+    cardHeadword_ = word[0] ? word : cardWord_;
+    cardState_ = CardState::Ready;
+    aiWaiting_ = false;
+    LOG_INF("AI", "card AI result gen=%u word='%s' bytes=%u in %lums -> replaced card body",
+            generation, cardHeadword_.c_str(), (unsigned)cardDefinition_.size(), elapsed);
+    requestUpdate();
+    return;
+  }
+  if (millis() - aiQueryStartMs_ >= AI_QUERY_TIMEOUT_MS) {
+    LOG_INF("AI", "card AI timeout after %lums -> fallback to local def", millis() - aiQueryStartMs_);
+    restoreLocalDef();
+  }
+}
+
+// AI-wire: restore the cached local definition (or the not-found state) so the
+// card is never blank after a failed/timed-out AI query.
+void ClipSelectionActivity::restoreLocalDef() {
+  aiWaiting_ = false;
+  if (cardHasLocalDef_) {
+    cardDefinition_ = cardLocalDefinition_;
+    cardHeadword_ = cardLocalHeadword_;
+    cardState_ = CardState::Ready;
+  } else {
+    cardDefinition_.clear();
+    cardHeadword_.clear();
+    cardState_ = CardState::NotFound;  // literal "未找到该词" — never blank
+  }
+  requestUpdate();
+}
+
 void ClipSelectionActivity::drawDefinitionCard() const {
   const Rect card = cardRect();
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -983,6 +1080,15 @@ void ClipSelectionActivity::drawDefinitionCard() const {
   switch (cardState_) {
     case CardState::Looking: {
       renderer.drawText(font, textX, textY, tr(STR_DICT_LOOKING_UP), true, EpdFontFamily::REGULAR);
+      break;
+    }
+    case CardState::AiPending: {
+      // AI-wire: reuse the "Looking…" draw path; Chinese glyphs need prewarm on
+      // SD-card fonts (same mask as the definition viewer).
+      if (renderer.isSdCardFont(font)) {
+        renderer.ensureSdCardFontReady(font, "AI 查询中…", 0x03);
+      }
+      renderer.drawText(font, textX, textY, "AI 查询中…", true, EpdFontFamily::REGULAR);
       break;
     }
     case CardState::Ready: {
@@ -1026,8 +1132,9 @@ void ClipSelectionActivity::drawDefinitionCard() const {
       break;
   }
 
-  // AI button: placeholder this batch — press gives a visual ack only, no 0x1A.
-  const bool pressed = millis() < aiFeedbackUntil_;
+  // AI button: busy (inverted) for the whole AiPending window, plus a short
+  // click ack. The button is now live — it fires 0x1A and waits for 0x07.
+  const bool pressed = (cardState_ == CardState::AiPending) || (millis() < aiFeedbackUntil_);
   renderer.fillRoundedRect(ai.x, ai.y, ai.width, ai.height, metrics.controlRadius, pressed ? Color::Black : Color::White);
   renderer.drawRoundedRect(ai.x, ai.y, ai.width, ai.height, 1, metrics.controlRadius, true);
   UITheme::drawCenteredWrappedText(renderer, ai, font, "AI", 1, !pressed, EpdFontFamily::REGULAR,

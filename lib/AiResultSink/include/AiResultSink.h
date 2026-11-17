@@ -39,6 +39,13 @@ bool pump();
 bool latest(char* word, size_t wordCap, char* text, size_t textCap,
             uint32_t* generation);
 
+// B11 consumption face: the latest *single-frame* definition (not the
+// accumulated on-screen text returned by latest()). The inline definition card
+// replaces its body with exactly one 0x07 answer, so it must not receive the
+// append/reflow history. Copies into caller buffers; returns false if none yet.
+bool latestFrame(char* word, size_t wordCap, char* def, size_t defCap,
+                 uint32_t* generation);
+
 // Diagnostics counters (audit).
 struct Stats {
   uint32_t received;   // 0x07 writes published

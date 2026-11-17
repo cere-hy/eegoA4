@@ -527,6 +527,25 @@ bool EpubReaderActivity::lookupForCard(const char* word, std::string& definition
   return found;
 }
 
+// AI-wire: card AI button → 0x1A. Builds the §2.1 scene context from the current
+// page (same path as the legacy AiLookup action) and calls emitScene(). The
+// codec/emitScene emits the full audit log: opcode/payload/frames/word/wordOff/
+// result — this wrapper only records the card-origin and the frame count.
+int EpubReaderActivity::sendAiForCard(const char* word, size_t wordLen) {
+  if (!word || wordLen == 0) return 0;
+  auto page = section ? section->loadPage(section->currentPage) : nullptr;
+  std::string sceneCtx;
+  uint16_t wordOff = 0;
+  uint8_t flags = PSC_FLAG_SENTENCE_FALLBACK;
+  if (page && !buildSceneContext(page.get(), std::string(word, wordLen), sceneCtx, wordOff)) {
+    flags = static_cast<uint8_t>(flags | PSC_FLAG_CTX_TRUNCATED);
+  }
+  const int frames = scenepush::emitScene(word, wordLen, sceneCtx.data(), sceneCtx.size(), wordOff, flags);
+  LOG_INF("AI", "card AI send: word='%s' len=%u wordOff=%u ctxLen=%u frames=%d",
+          word, (unsigned)wordLen, (unsigned)wordOff, (unsigned)sceneCtx.size(), frames);
+  return frames;
+}
+
 void EpubReaderActivity::openDictionaryWordSelect() {
   if (SETTINGS.dictionaryName[0] == '\0') {
     pendingLookupSelection = {};
@@ -586,6 +605,11 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
   if (mode != ClipSelectionActivity::Mode::DefinitionLookup) {
     activity->setLookupHandler([this](const char* word, std::string& defOut, std::string& headOut) {
       return lookupForCard(word, defOut, headOut);
+    });
+    // AI-wire: the card's AI button fires 0x1A through the same page context as
+    // the legacy action. The BLE send + 0x07 receive chain is untouched.
+    activity->setAiSendHandler([this](const char* word, size_t wordLen) {
+      return sendAiForCard(word, wordLen);
     });
   }
   startActivityForResult(std::move(activity), [this, spineIndex, pageNumber, bookTitle = std::move(bookTitle),

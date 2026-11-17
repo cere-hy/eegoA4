@@ -49,6 +49,13 @@ class ClipSelectionActivity final : public Activity {
   using LookupHandler = std::function<bool(const char* word, std::string& definitionOut, std::string& headwordOut)>;
   void setLookupHandler(LookupHandler handler) { lookupHandler_ = std::move(handler); }
 
+  // AI-wire batch: the card's AI button fires the real 0x1A scene push via a
+  // host-injected closure (the host owns the page context for ctx/wordOff).
+  // Returns the number of frames actually sent (0 = gated: no peer/not
+  // registered), so the card can decide whether to wait for a 0x07 result.
+  using AiSendHandler = std::function<int(const char* word, size_t wordLen)>;
+  void setAiSendHandler(AiSendHandler handler) { aiSendHandler_ = std::move(handler); }
+
   void onEnter() override;
   void loop() override;
   void render(RenderLock&&) override;
@@ -108,7 +115,7 @@ class ClipSelectionActivity final : public Activity {
   void ditherGapBetween(const WordBox& a, const WordBox& b, int offsetX, int offset) const;
 
   // --- Definition card (design-correct v3) ---
-  enum class CardState : uint8_t { Hidden, Looking, Ready, NotFound, Error };
+  enum class CardState : uint8_t { Hidden, Looking, Ready, NotFound, Error, AiPending };
   void beginCardLookup();   // extract selected word, kick off lookup (idempotent per selection)
   void runCardLookup();     // perform the (blocking SD) lookup outside the render lock
   void resetCard();          // clear cached definition when the selection changes
@@ -116,6 +123,9 @@ class ClipSelectionActivity final : public Activity {
   int aiButtonAt(int x, int y) const;  // 0 = AI button hit, -1 = elsewhere (left text area is inert)
   Rect cardRect() const;
   Rect cardAiButtonRect(const Rect& card) const;
+  void beginAiQuery();      // AI-wire: fire 0x1A via injected handler, enter AiPending
+  void pollAiResult();      // AI-wire: consume a fresh 0x07 result or time out back to local def
+  void restoreLocalDef();   // AI-wire: fall back to the cached local definition
 
   std::vector<std::unique_ptr<Page>> pages;
   std::span<const std::unique_ptr<Page>> borrowedPages;
@@ -129,12 +139,24 @@ class ClipSelectionActivity final : public Activity {
   OptionPopup actionPopup;
   // Design-correct v3 definition card state.
   LookupHandler lookupHandler_;
+  AiSendHandler aiSendHandler_;
   CardState cardState_ = CardState::Hidden;
   std::string cardWord_;
   std::string cardDefinition_;
   std::string cardHeadword_;
   bool cardLookupPending_ = false;
   unsigned long aiFeedbackUntil_ = 0;
+  // AI-wire batch: keep the local definition so a timeout/failed AI query can
+  // always fall back to it (never a blank card).
+  std::string cardLocalDefinition_;
+  std::string cardLocalHeadword_;
+  bool cardHasLocalDef_ = false;
+  // 0x07 result consumption: snapshot the last committed generation at query
+  // time; a strictly newer generation means pump() decoded a fresh answer.
+  // (generation advances only after decode+screen-apply, so no publish/pump race.)
+  uint32_t aiWaitBaseGen_ = 0;
+  unsigned long aiQueryStartMs_ = 0;
+  bool aiWaiting_ = false;
   // ponytail: retain 16 button frames during refresh; increase only if overflow is observed.
   std::array<uint8_t, 16> pendingButtons{};
   size_t pendingButtonCount = 0;

@@ -27,6 +27,10 @@ class EpubReaderActivity final : public ReaderActivity {
   std::unique_ptr<Dictionary> cardDictionary;
   bool cardDictionaryAttempted = false;
   bool lookupForCard(const char* word, std::string& definitionOut, std::string& headwordOut);
+  // AI-wire: build the §2.1 scene context from the current page and fire 0x1A.
+  // Returns frames sent (0 = gated). Reuses the same ctx/wordOff path as the
+  // legacy AiLookup action; emitScene() itself logs opcode/payload/frames/etc.
+  int sendAiForCard(const char* word, size_t wordLen);
   std::unique_ptr<Epub::SyncMetadata> vocabularyMetadata;
   std::unique_ptr<Section> section = nullptr;
   int currentSpineIndex = 0;
