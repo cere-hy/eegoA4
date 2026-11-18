@@ -546,15 +546,22 @@ void ClipSelectionActivity::loop() {
   }
   if (!touchDragSelecting && mappedInput.wasScreenTapped(touchX, touchY)) {
     if (rangeStart >= 0) {
-      // AI-wire: the definition card owns the popup region. Its left text area
-      // is inert (not a button, never cancels); only the right AI button is
-      // clickable — it now fires the real 0x1A scene push and waits for 0x07.
+      // Definition card hit regions are mutually exclusive, checked in order:
+      //   1) right AI button -> fire 0x1A scene push, wait for 0x07 (never opens the page);
+      //   2) card body (text area, AI button excluded) -> full-screen local def page;
+      //   3) outside the card -> falls through to the selection/cancel handling below.
+      // The AI button is tested first, so a single tap can never trigger two actions.
       if (cardState_ != CardState::Hidden) {
         if (aiButtonAt(touchX, touchY) == 0) {
           beginAiQuery();
           return;
         }
-        if (selectionGeometry::contains(cardRect(), touchX, touchY)) return;  // left area inert
+        if (selectionGeometry::contains(cardRect(), touchX, touchY)) {
+          // Only a Ready card has a full local definition worth showing. While
+          // Looking/AiPending/NotFound/Error, keep the body inert (no jump).
+          if (cardState_ == CardState::Ready && cardHasLocalDef_) openFullDefinition();
+          return;  // consumed by the card in all states — never falls through to cancel()
+        }
       } else {
         // Legacy action bar (DefinitionLookup re-select mode) — unchanged.
         const int action = actionAt(touchX, touchY);
@@ -1082,6 +1089,25 @@ void ClipSelectionActivity::restoreLocalDef() {
     cardState_ = CardState::NotFound;  // literal "未找到该词" — never blank
   }
   requestUpdate();
+}
+
+// Card body tap: hand the FULL local definition to the reader, which launches
+// the same full-screen DictionaryDefinitionActivity used for AI answers (page
+// header prefix differs: "DICT " vs "AI "). We finish() this selection card so
+// the full-screen viewer's parent is the reader itself — Back returns to the
+// exact reading position and never reopens the card. Only Ready cards with a
+// cached local def reach here (see handleInput hit regions).
+void ClipSelectionActivity::openFullDefinition() {
+  if (cardState_ != CardState::Ready || !cardHasLocalDef_ || cardDefinition_.empty()) return;
+  LOG_INF("DICT", "card body tap -> full-screen local def head='%s' bytes=%u",
+          cardHeadword_.c_str(), (unsigned)cardDefinition_.size());
+  ActivityResult result;
+  LocalDefinitionResult localResult;
+  localResult.headword = cardHeadword_.empty() ? cardWord_ : cardHeadword_;
+  localResult.definition = cardDefinition_;  // full, untruncated (card only showed a 4-line preview)
+  result.data = std::move(localResult);
+  setResult(std::move(result));
+  finish();
 }
 
 void ClipSelectionActivity::drawDefinitionCard() const {

@@ -66,6 +66,16 @@ struct AiDefinitionResult {
   bool truncated = false;
 };
 
+// Local RPD1 definition handed from the selection card to the reader when the
+// card BODY is tapped (as opposed to the AI button). The reader launches the
+// same full-screen DictionaryDefinitionActivity used for AI answers, with a
+// "DICT " header prefix instead of "AI ". `definition` is the full (untruncated)
+// local def; the card only ever showed a 4-line ellipsised preview.
+struct LocalDefinitionResult {
+  std::string headword;
+  std::string definition;
+};
+
 struct ProgressChangeResult {
   int spineIndex = 0;
   int page = 0;
@@ -95,8 +105,8 @@ struct FilePathResult {
 
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
-                 PageResult, ClippingResult, AiDefinitionResult, ProgressChangeResult, NetworkModeResult, FootnoteResult,
-                 FilePathResult>;
+                 PageResult, ClippingResult, AiDefinitionResult, LocalDefinitionResult, ProgressChangeResult,
+                 NetworkModeResult, FootnoteResult, FilePathResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

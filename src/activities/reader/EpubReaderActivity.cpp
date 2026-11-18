@@ -708,6 +708,29 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
       startActivityForResult(std::move(viewer), nullptr);
       return;
     }
+    // Card body tap: same full-screen paged viewer, "DICT " header prefix.
+    // The card already popped (we are its parent), so Back returns to this
+    // exact reading position and does NOT reopen the card. Full local def is
+    // passed verbatim (RPD1 plain text); DDA::wrapText handles \n line breaks.
+    if (std::holds_alternative<LocalDefinitionResult>(result.data)) {
+      const auto& local = std::get<LocalDefinitionResult>(result.data);
+      if (local.definition.empty()) {
+        requestUpdate();
+        return;
+      }
+      auto viewer = makeUniqueNoThrow<DictionaryDefinitionActivity>(
+          renderer, mappedInput, std::string("DICT ") + local.headword, local.definition,
+          /*htmlDefinition=*/false);
+      if (!viewer) {
+        LOG_ERR("DICT", "OOM: full-screen local definition viewer");
+        requestUpdate();
+        return;
+      }
+      LOG_INF("DICT", "launch full-screen local def page: headword='%s' bytes=%u (from card body tap)",
+              local.headword.c_str(), (unsigned)local.definition.size());
+      startActivityForResult(std::move(viewer), nullptr);
+      return;
+    }
     const auto& clipping = std::get<ClippingResult>(result.data);
     const uint16_t startPage = static_cast<uint16_t>(pageNumber + clipping.startPageOffset);
     const uint16_t endPage = static_cast<uint16_t>(pageNumber + clipping.endPageOffset);

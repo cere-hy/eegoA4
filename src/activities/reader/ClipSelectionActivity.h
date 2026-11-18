@@ -122,7 +122,8 @@ class ClipSelectionActivity final : public Activity {
   void runCardLookup();     // perform the (blocking SD) lookup outside the render lock
   void resetCard();          // clear cached definition when the selection changes
   void drawDefinitionCard() const;
-  int aiButtonAt(int x, int y) const;  // 0 = AI button hit, -1 = elsewhere (left text area is inert)
+  int aiButtonAt(int x, int y) const;  // 0 = AI button hit, -1 = elsewhere
+  void openFullDefinition();  // card BODY tap -> full-screen local def (setResult + finish)
   Rect cardRect() const;
   Rect cardAiButtonRect(const Rect& card) const;
   void beginAiQuery();      // AI-wire: fire 0x1A via injected handler, enter AiPending
