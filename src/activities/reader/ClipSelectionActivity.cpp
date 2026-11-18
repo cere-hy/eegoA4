@@ -478,6 +478,16 @@ void ClipSelectionActivity::confirmSelection(const ClippingResult::Action action
 }
 
 void ClipSelectionActivity::cancel() {
+  // S0 (b65): freeze the sink's current generation as a sticky discard floor
+  // BEFORE finishing. cancel() destroys this Activity; a re-tap creates a new
+  // instance whose aiWaitBaseGen_ is freshly snapshotted. Any reply to the
+  // query being cancelled that lands around that snapshot could otherwise
+  // satisfy `gen > baseGen` and be mis-attributed. The floor lives in the sink
+  // (global) so it survives across Activity instances; invalidateUpTo() also
+  // clears a half-reassembled 0x08. pollAiResult rejects gen <= floor.
+  aireceivesink::invalidateUpTo(aireceivesink::currentGeneration());
+  LOG_INF("AI", "card AI cancel: discardFloor=%u + seg reset",
+          (unsigned)aireceivesink::discardFloor());
   resetCard();
   ActivityResult result;
   result.isCancelled = true;
@@ -1081,6 +1091,11 @@ void ClipSelectionActivity::beginAiQuery() {
   // there is no publish/pump race and no stale-frame false positive).
   uint32_t baseGen = 0;
   aireceivesink::latestFrame(nullptr, 0, nullptr, 0, &baseGen);
+  // S0 (b65): a re-query after cancel must not snap back below the discard
+  // floor left by the cancelled query; otherwise a late reply in the gap could
+  // exceed this stale baseGen. Clamp so gen <= floor stays rejected by poll.
+  const uint32_t floor = aireceivesink::discardFloor();
+  if (baseGen < floor) baseGen = floor;
   aiWaitBaseGen_ = baseGen;
   aiQueryStartMs_ = millis();
   aiWaiting_ = true;
@@ -1124,8 +1139,12 @@ void ClipSelectionActivity::pollAiResult() {
   uint32_t generation = aiWaitBaseGen_;
   // Use latestFrame() (single 0x07 answer OR reassembled 0x08 full def), NOT
   // latest() which returns the append/reflow history.
+  // S0 (b65): gen must clear BOTH this query's baseGen and the sticky cancel
+  // floor. The floor closes the cancel-then-refast gap where a cancelled
+  // query's late reply lands after a fresh Activity snapshotted a stale baseGen.
   if (aireceivesink::latestFrame(word, sizeof(word), &def[0], def.size(), &generation) &&
-      generation > aiWaitBaseGen_) {
+      generation > aiWaitBaseGen_ &&
+      generation > aireceivesink::discardFloor()) {
     const unsigned long elapsed = millis() - aiQueryStartMs_;
     aiWaiting_ = false;
     def.resize(std::strlen(def.c_str()));  // trim to actual bytes

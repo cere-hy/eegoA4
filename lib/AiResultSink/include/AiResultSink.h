@@ -77,6 +77,19 @@ bool takeSegError(SegErrorInfo* out);
 // half-collected definition never splices into the next query).
 void resetSegmentation();
 
+// S0 (b65): cancel-then-refast guard. currentGeneration() is the max committed
+// generation across the 0x07 screen slot and the 0x08 reassembled slot — the
+// value a fresh query would snapshot as its baseGen. invalidateUpTo(gen) records
+// a sticky discard floor (max with any previous floor) AND clears in-flight
+// reassembly, so a cancelled query's late reply — which lands after the next
+// query's baseGen snapshot and would otherwise satisfy `gen > baseGen` — is
+// rejected by the poll's `gen > discardFloor()` check. The floor is global and
+// survives Activity destruction (cancel finishes the Activity; re-tap creates
+// a new one with a fresh aiWaitBaseGen_ member, so the guard cannot live there).
+uint32_t currentGeneration();
+void invalidateUpTo(uint32_t gen);
+uint32_t discardFloor();
+
 // Diagnostics counters (audit).
 struct Stats {
   uint32_t received;   // 0x07 writes published

@@ -46,6 +46,12 @@ std::atomic<uint32_t> g_segSeq{0};
 std::atomic<uint32_t> g_segReadyGen{0};  // 0 = no 0x08 result yet; else its generation
 uint32_t g_segReadyLen = 0;              // guarded by g_segSeq
 
+// S0 (b65): sticky discard floor for the cancel-then-refast guard. Written by
+// the loop task in invalidateUpTo() on cancel; read by pollAiResult so a late
+// reply to a cancelled query (gen <= floor) is ignored even though a fresh
+// Activity snapshotted a stale/zero aiWaitBaseGen_ after cancel finished it.
+std::atomic<uint32_t> g_discardFloor{0};
+
 // Error state packed into one atomic u64 so host-task writes / loop-task reads
 // need no lock: low 32 = monotonic generation (0 = none), high 32 = reason code.
 std::atomic<uint64_t> g_segErrorPacked{0};
@@ -276,7 +282,9 @@ bool takeSegError(SegErrorInfo* out) {
   static uint32_t lastSeen = 0;
   const uint64_t packed = g_segErrorPacked.load(std::memory_order_acquire);
   const uint32_t gen = (uint32_t)(packed & 0xFFFFFFFFu);
-  if (gen == 0 || gen == lastSeen) return false;
+  // S0 (b65): a late seg error from a cancelled query (gen <= discard floor)
+  // must not surface as a false prompt in a fresh query's Activity.
+  if (gen == 0 || gen == lastSeen || gen <= g_discardFloor.load(std::memory_order_acquire)) return false;
   if (out != nullptr) {
     out->code = (SegError)(uint32_t)(packed >> 32);
     out->generation = gen;
@@ -289,6 +297,30 @@ void resetSegmentation() {
   // Called from the loop task (e.g. on disconnect). Defer the actual memset to
   // pump() so it can never race the host task's ai_segasm_feed().
   g_segResetPending.store(true, std::memory_order_release);
+}
+
+uint32_t currentGeneration() {
+  // max committed generation across both result slots — the value a fresh
+  // query would snapshot as its baseGen. g_screen.last_gen is loop-task-owned;
+  // g_segReadyGen is atomic but is only ever advanced on the host task. Called
+  // from the loop task (cancel/send), so reading both here is race-free.
+  const uint32_t seg = g_segReadyGen.load(std::memory_order_acquire);
+  return seg > g_screen.last_gen ? seg : g_screen.last_gen;
+}
+
+void invalidateUpTo(uint32_t gen) {
+  // Sticky max: cancel after a later invalidate must never lower the floor.
+  uint32_t cur = g_discardFloor.load(std::memory_order_relaxed);
+  while (gen > cur &&
+         !g_discardFloor.compare_exchange_weak(cur, gen,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_relaxed)) {
+  }
+  resetSegmentation();  // clear any half-reassembled 0x08 in the same cancel path
+}
+
+uint32_t discardFloor() {
+  return g_discardFloor.load(std::memory_order_acquire);
 }
 
 Stats stats() {
