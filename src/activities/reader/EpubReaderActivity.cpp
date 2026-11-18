@@ -28,6 +28,7 @@
 
 #include "ChapterBuildGate.h"
 #include "ClipSelectionActivity.h"
+#include "DictionaryDefinitionActivity.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "DictionaryWordSelectActivity.h"
@@ -532,18 +533,80 @@ bool EpubReaderActivity::lookupForCard(const char* word, std::string& definition
 // page (same path as the legacy AiLookup action) and calls emitScene(). The
 // codec/emitScene emits the full audit log: opcode/payload/frames/word/wordOff/
 // result — this wrapper only records the card-origin and the frame count.
-int EpubReaderActivity::sendAiForCard(const char* word, size_t wordLen) {
-  if (!word || wordLen == 0) return 0;
-  auto page = section ? section->loadPage(section->currentPage) : nullptr;
-  std::string sceneCtx;
-  uint16_t wordOff = 0;
-  uint8_t flags = PSC_FLAG_SENTENCE_FALLBACK;
-  if (page && !buildSceneContext(page.get(), std::string(word, wordLen), sceneCtx, wordOff)) {
-    flags = static_cast<uint8_t>(flags | PSC_FLAG_CTX_TRUNCATED);
+int EpubReaderActivity::sendAiForCard(const char* selection, size_t selectionLen, bool& truncatedOut) {
+  truncatedOut = false;
+  if (!selection || selectionLen == 0) return 0;
+
+  // White-paper §2.1 bit2 (EXCERPT): a multi-word selection is sent as
+  //   word  = first-word anchor (<=63 B, UTF-8 safe; emitScene clamps)
+  //   ctx   = the full selected passage (<=1024 B, cut on a UTF-8 boundary)
+  //   wordOff = 0, flags |= PSC_FLAG_EXCERPT (+ PSC_FLAG_CTX_TRUNCATED if cut)
+  // A single word keeps the already field-verified sentence-fallback path
+  // (ctx = current page, wordOff = real offset) — do not regress that正例.
+  bool multiWord = false;
+  for (size_t i = 0; i < selectionLen; ++i) {
+    const char c = selection[i];
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { multiWord = true; break; }
   }
-  const int frames = scenepush::emitScene(word, wordLen, sceneCtx.data(), sceneCtx.size(), wordOff, flags);
-  LOG_INF("AI", "card AI send: word='%s' len=%u wordOff=%u ctxLen=%u frames=%d",
-          word, (unsigned)wordLen, (unsigned)wordOff, (unsigned)sceneCtx.size(), frames);
+
+  std::string anchor;
+  std::string ctx;
+  uint16_t wordOff = 0;
+  uint8_t flags = 0;
+
+  if (!multiWord) {
+    auto page = section ? section->loadPage(section->currentPage) : nullptr;
+    flags = PSC_FLAG_SENTENCE_FALLBACK;
+    if (page && buildSceneContext(page.get(), std::string(selection, selectionLen), ctx, wordOff)) {
+      // sentence/page context built as before
+    } else {
+      flags = static_cast<uint8_t>(flags | PSC_FLAG_CTX_TRUNCATED);
+      ctx.assign(selection, selectionLen);
+      wordOff = 0;
+    }
+    anchor.assign(selection, selectionLen);
+  } else {
+    // First-word anchor: skip leading whitespace (ASCII + NBSP C2 A0 +
+    // em-space E2 80 A3, same set as ClipSelection's cleanWordStart), then take
+    // the first token. emitScene() applies psc_word_clamp for the <=63 B cap.
+    size_t p = 0;
+    auto skipLeadingSpace = [&]() {
+      while (p < selectionLen) {
+        const unsigned char c = static_cast<unsigned char>(selection[p]);
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++p; continue; }
+        if (c == 0xC2 && p + 1 < selectionLen && static_cast<unsigned char>(selection[p + 1]) == 0xA0) { p += 2; continue; }
+        if (c == 0xE2 && p + 2 < selectionLen && static_cast<unsigned char>(selection[p + 1]) == 0x80 &&
+            static_cast<unsigned char>(selection[p + 2]) == 0xA3) { p += 3; continue; }
+        break;
+      }
+    };
+    skipLeadingSpace();
+    const size_t anchorStart = p;
+    while (p < selectionLen) {
+      const unsigned char c = static_cast<unsigned char>(selection[p]);
+      if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
+      ++p;
+    }
+    anchor.assign(selection + anchorStart, p - anchorStart);
+    if (anchor.empty()) anchor.assign(selection, std::min<size_t>(selectionLen, PSC_WORD_MAX));
+
+    ctx.assign(selection, selectionLen);
+    flags = PSC_FLAG_EXCERPT;
+    wordOff = 0;
+    if (ctx.size() > PSC_CTX_MAX) {
+      size_t cut = PSC_CTX_MAX;
+      while (cut > 0 && (static_cast<unsigned char>(ctx[cut]) & 0xC0) == 0x80) --cut;  // back off to a UTF-8 boundary
+      ctx.resize(cut);
+      flags = static_cast<uint8_t>(flags | PSC_FLAG_CTX_TRUNCATED);
+      truncatedOut = true;
+      LOG_INF("AI", "bit2 ctx cut at %u B (from %u B), bit0 set; UI will show [CUT]",
+              (unsigned)ctx.size(), (unsigned)selectionLen);
+    }
+  }
+
+  const int frames = scenepush::emitScene(anchor.data(), anchor.size(), ctx.data(), ctx.size(), wordOff, flags);
+  LOG_INF("AI", "card AI send: anchor='%s' wordOff=%u ctxLen=%u flags=0x%02X trunc=%d frames=%d",
+          anchor.c_str(), (unsigned)wordOff, (unsigned)ctx.size(), (unsigned)flags, truncatedOut ? 1 : 0, frames);
   return frames;
 }
 
@@ -609,8 +672,8 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
     });
     // AI-wire: the card's AI button fires 0x1A through the same page context as
     // the legacy action. The BLE send + 0x07 receive chain is untouched.
-    activity->setAiSendHandler([this](const char* word, size_t wordLen) {
-      return sendAiForCard(word, wordLen);
+    activity->setAiSendHandler([this](const char* selection, size_t selectionLen, bool& truncatedOut) {
+      return sendAiForCard(selection, selectionLen, truncatedOut);
     });
   }
   startActivityForResult(std::move(activity), [this, spineIndex, pageNumber, bookTitle = std::move(bookTitle),
@@ -618,6 +681,31 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
                                                chapterTitle = std::move(chapterTitle)](const ActivityResult& result) {
     if (result.isCancelled) {
       requestUpdate();
+      return;
+    }
+    // AI 0x07 answer: launch the full-screen paged definition viewer. Its
+    // parent is this reader (the selection card already popped), so Back
+    // returns to the exact reading position, never to the card. Headword
+    // prefix is ASCII ("AI " / "AI [CUT] ") to stay glyph-safe on the header;
+    // the Chinese definition body is preloaded by DDA::prepareFont().
+    if (std::holds_alternative<AiDefinitionResult>(result.data)) {
+      const auto& ai = std::get<AiDefinitionResult>(result.data);
+      if (ai.definition.empty()) {
+        requestUpdate();
+        return;
+      }
+      std::string header = ai.truncated ? "AI [CUT] " : "AI ";
+      header += ai.headword;
+      auto viewer = makeUniqueNoThrow<DictionaryDefinitionActivity>(renderer, mappedInput, std::move(header),
+                                                                    ai.definition, /*htmlDefinition=*/false);
+      if (!viewer) {
+        LOG_ERR("AI", "OOM: full-screen AI definition viewer");
+        requestUpdate();
+        return;
+      }
+      LOG_INF("AI", "launch full-screen AI def page: headword='%s' bytes=%u truncated=%d",
+              ai.headword.c_str(), (unsigned)ai.definition.size(), ai.truncated ? 1 : 0);
+      startActivityForResult(std::move(viewer), nullptr);
       return;
     }
     const auto& clipping = std::get<ClippingResult>(result.data);

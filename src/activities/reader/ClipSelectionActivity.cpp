@@ -995,20 +995,10 @@ int ClipSelectionActivity::aiButtonAt(const int x, const int y) const {
 void ClipSelectionActivity::beginAiQuery() {
   if (aiWaiting_ || cardWord_.empty()) return;
 
-  // diag-mtu (temporary guard): bit2 whole-passage is NOT implemented yet —
-  // today the whole selection is stuffed into `word` and clamped to 63 B, which
-  // emits a malformed frame. Reject any multi-word selection with a short ASCII
-  // notice and send nothing, so diagnostics are not polluted. Single-word AI is
-  // unaffected. Formal bit2 lands in a later batch.
-  const bool multiWord = cardWord_.find_first_of(" \t\r\n") != std::string::npos;
-  if (multiWord) {
-    LOG_INF("AI", "AI query rejected: multi-word selection (%u bytes), bit2 not implemented",
-            (unsigned)cardWord_.size());
-    cardNotice_ = "AI: one word only";
-    aiFeedbackUntil_ = millis() + AI_FEEDBACK_MS;
-    requestUpdate();
-    return;
-  }
+  // bit2 batch: multi-word restriction removed — every selection may query AI.
+  // The host splits the first-word anchor from the full-passage ctx and tags
+  // PSC_FLAG_EXCERPT; no malformed "whole passage clamped into word" frame.
+  aiCtxTruncated_ = false;
 
   if (!aiSendHandler_) {
     LOG_ERR("AI", "AI button tapped but no send handler injected");
@@ -1016,7 +1006,7 @@ void ClipSelectionActivity::beginAiQuery() {
     requestUpdate();
     return;
   }
-  const int frames = aiSendHandler_(cardWord_.c_str(), cardWord_.size());
+  const int frames = aiSendHandler_(cardWord_.c_str(), cardWord_.size(), aiCtxTruncated_);
   if (frames <= 0) {
     // Gated (no peer / not registered): nothing will come back — don't hang.
     LOG_INF("AI", "card AI gated frames=0 -> keep local def, no wait");
@@ -1052,13 +1042,24 @@ void ClipSelectionActivity::pollAiResult() {
   if (aireceivesink::latestFrame(word, sizeof(word), def, sizeof(def), &generation) &&
       generation > aiWaitBaseGen_) {
     const unsigned long elapsed = millis() - aiQueryStartMs_;
-    cardDefinition_ = def;
-    cardHeadword_ = word[0] ? word : cardWord_;
-    cardState_ = CardState::Ready;
     aiWaiting_ = false;
-    LOG_INF("AI", "card AI result gen=%u word='%s' bytes=%u in %lums -> replaced card body",
-            generation, cardHeadword_.c_str(), (unsigned)cardDefinition_.size(), elapsed);
-    requestUpdate();
+    LOG_INF("AI", "card AI result gen=%u word='%s' bytes=%u in %lums -> full-screen AI def page (truncated=%d)",
+            generation, word[0] ? word : cardWord_.c_str(), (unsigned)cardDefinition_.size(), elapsed,
+            aiCtxTruncated_ ? 1 : 0);
+    // AI result goes to a full-screen paged reader, not the small card (the
+    // 144–176-char answer cannot fit in 4 card lines). Hand it to the reader
+    // via result; the reader launches DictionaryDefinitionActivity so that its
+    // parent is the reader itself -> Back returns to the exact reading position,
+    // never to this card. Timeout/failure still calls restoreLocalDef() below.
+    ActivityResult result;
+    AiDefinitionResult aiResult;
+    aiResult.headword = word[0] ? word : cardHeadword_;
+    if (aiResult.headword.empty()) aiResult.headword = cardWord_;
+    aiResult.definition = def;
+    aiResult.truncated = aiCtxTruncated_;
+    result.data = std::move(aiResult);
+    setResult(std::move(result));
+    finish();
     return;
   }
   if (millis() - aiQueryStartMs_ >= AI_QUERY_TIMEOUT_MS) {

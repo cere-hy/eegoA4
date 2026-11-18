@@ -27,10 +27,11 @@ class EpubReaderActivity final : public ReaderActivity {
   std::unique_ptr<Dictionary> cardDictionary;
   bool cardDictionaryAttempted = false;
   bool lookupForCard(const char* word, std::string& definitionOut, std::string& headwordOut);
-  // AI-wire: build the §2.1 scene context from the current page and fire 0x1A.
-  // Returns frames sent (0 = gated). Reuses the same ctx/wordOff path as the
-  // legacy AiLookup action; emitScene() itself logs opcode/payload/frames/etc.
-  int sendAiForCard(const char* word, size_t wordLen);
+  // AI-wire (bit2): split the selected passage into a first-word anchor + ctx,
+  // tag PSC_FLAG_EXCERPT (and PSC_FLAG_CTX_TRUNCATED when cut at 1024 B on a
+  // UTF-8 boundary), and fire 0x1A. `truncatedOut` reports bit0 to the card.
+  // Returns frames sent (0 = gated); emitScene() logs opcode/payload/frames.
+  int sendAiForCard(const char* selection, size_t selectionLen, bool& truncatedOut);
   std::unique_ptr<Epub::SyncMetadata> vocabularyMetadata;
   std::unique_ptr<Section> section = nullptr;
   int currentSpineIndex = 0;

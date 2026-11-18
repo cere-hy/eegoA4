@@ -49,11 +49,13 @@ class ClipSelectionActivity final : public Activity {
   using LookupHandler = std::function<bool(const char* word, std::string& definitionOut, std::string& headwordOut)>;
   void setLookupHandler(LookupHandler handler) { lookupHandler_ = std::move(handler); }
 
-  // AI-wire batch: the card's AI button fires the real 0x1A scene push via a
-  // host-injected closure (the host owns the page context for ctx/wordOff).
-  // Returns the number of frames actually sent (0 = gated: no peer/not
-  // registered), so the card can decide whether to wait for a 0x07 result.
-  using AiSendHandler = std::function<int(const char* word, size_t wordLen)>;
+  // AI-wire (bit2 batch): the card's AI button fires the real 0x1A scene push
+  // via a host-injected closure. `selection` is the full selected passage; the
+  // host splits the first-word anchor / ctx and sets PSC_FLAG_EXCERPT itself.
+  // Returns frames sent (0 = gated), and reports through `truncatedOut` whether
+  // the ctx exceeded PSC_CTX_MAX and was cut (bit0), for the "[CUT]" UI marker.
+  using AiSendHandler =
+      std::function<int(const char* selection, size_t selectionLen, bool& truncatedOut)>;
   void setAiSendHandler(AiSendHandler handler) { aiSendHandler_ = std::move(handler); }
 
   void onEnter() override;
@@ -160,6 +162,9 @@ class ClipSelectionActivity final : public Activity {
   uint32_t aiWaitBaseGen_ = 0;
   unsigned long aiQueryStartMs_ = 0;
   bool aiWaiting_ = false;
+  // bit2 batch: true when this query's 0x1A ctx was cut at PSC_CTX_MAX (bit0
+  // set on the wire); carried into AiDefinitionResult for the full-screen "[CUT]".
+  bool aiCtxTruncated_ = false;
   // ponytail: retain 16 button frames during refresh; increase only if overflow is observed.
   std::array<uint8_t, 16> pendingButtons{};
   size_t pendingButtonCount = 0;

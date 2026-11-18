@@ -56,6 +56,16 @@ struct ClippingResult {
   bool cursorAtStart = false;
 };
 
+// AI 0x07 result handed from the selection card to the reader: the reader
+// launches a full-screen DictionaryDefinitionActivity from this. `truncated`
+// records that the 0x1A ctx exceeded PSC_CTX_MAX and was cut (bit0 was set),
+// so the AI page header can show a "[cut]" marker.
+struct AiDefinitionResult {
+  std::string headword;
+  std::string definition;
+  bool truncated = false;
+};
+
 struct ProgressChangeResult {
   int spineIndex = 0;
   int page = 0;
@@ -85,7 +95,8 @@ struct FilePathResult {
 
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
-                 PageResult, ClippingResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, FilePathResult>;
+                 PageResult, ClippingResult, AiDefinitionResult, ProgressChangeResult, NetworkModeResult, FootnoteResult,
+                 FilePathResult>;
 
 struct ActivityResult {
   bool isCancelled = false;
