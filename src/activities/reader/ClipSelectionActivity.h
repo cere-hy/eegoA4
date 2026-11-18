@@ -132,6 +132,7 @@ class ClipSelectionActivity final : public Activity {
   void openFullDefinition();  // card BODY tap -> full-screen local def (setResult + finish)
   Rect cardRect() const;
   Rect cardAiButtonRect(const Rect& card) const;
+  Rect cardAiHitRect(const Rect& card) const;  // decoupled 60x55 touch target (visual 45x40)
   void beginAiQuery();      // AI-wire: fire 0x1A via injected handler, enter AiPending
   void pollAiResult();      // AI-wire: consume a fresh 0x07 result or time out back to local def
   void restoreLocalDef();   // AI-wire: fall back to the cached local definition

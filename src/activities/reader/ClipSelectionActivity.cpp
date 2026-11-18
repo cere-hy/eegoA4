@@ -44,6 +44,18 @@ constexpr ClippingResult::Action SELECTION_ACTIONS[] = {
 // ellipsised by GfxRenderer::wrappedText (ink-screen: one full refresh total,
 // no in-card paging — see RPD1 card design receipt §1).
 constexpr int CARD_MAX_DEF_LINES = 4;
+// Interaction-final (2026-11-18): AI block is visually enlarged and its touch
+// target is DECOUPLED from the drawing rect. Visual = 45x40 (bottom-right, with
+// a light-fill + faint border affordance). Hit = 60x55, biased right/down so a
+// near-miss never lands in the local-definition full-screen region.
+constexpr int CARD_AI_VIS_W = 45;
+constexpr int CARD_AI_VIS_H = 40;
+constexpr int CARD_AI_HIT_W = 60;
+constexpr int CARD_AI_HIT_H = 55;
+// The hit rect grows right/down (into card margin, never content) and only
+// 5px up/left. 5px <= the 10~15px cap; the small left/up growth stays inside
+// the button's own column/gutter, so definition text is never overlapped.
+constexpr int CARD_AI_HIT_LEFT_UP = 5;
 constexpr unsigned long AI_FEEDBACK_MS = 1200;
 // AI-wire: max time the card waits for a 0x07 result before it restores the
 // cached local definition. Cloud AI round-trips are typically a few seconds;
@@ -516,6 +528,15 @@ void ClipSelectionActivity::loop() {
   // main loop (no render lock). main.cpp already calls aireceivesink::pump()
   // every iteration; here we only read the decoded result / enforce timeout.
   if (aiWaiting_) {
+    // Interaction-final: BACK cancels the in-flight AI wait and returns to the
+    // reader immediately — no blind 15 s timeout. loopButtons() below is skipped
+    // while waiting, so poll the edges here; on BACK, finish with isCancelled.
+    const uint8_t waitButtons = selectionInput.pollButtons(mappedInput, millis());
+    if (waitButtons & Input::INPUT_BACK) {
+      LOG_INF("AI", "card AI wait CANCELLED by BACK after %lums", millis() - aiQueryStartMs_);
+      cancel();  // resetCard() clears aiWaiting_; isCancelled result -> reader page
+      return;
+    }
     pollAiResult();
     return;
   }
@@ -968,7 +989,13 @@ Rect ClipSelectionActivity::cardRect() const {
   const int labelWidth = renderer.getTextWidth(font, tr(STR_LOOKUP));
   const int padding = metrics.menuSpacing;
   const int count = 2;  // same width budget as the legacy two-button bar
-  const int width = std::min(safe.width, count * (labelWidth + padding * 2) + padding * (count + 1));
+  // Interaction-final: the AI block grows from ~25px (label "AI" + 2*pad) to a
+  // fixed CARD_AI_VIS_W=45. Grow the card by exactly that delta so the text
+  // column keeps its original width — the enlarged button never eats into the
+  // definition text. Still capped by the safe area.
+  const int legacyWidth = count * (labelWidth + padding * 2) + padding * (count + 1);
+  const int oldAiBtnW = renderer.getTextWidth(font, "AI") + padding * 2;
+  const int width = std::min(safe.width, legacyWidth + std::max(0, CARD_AI_VIS_W - oldAiBtnW));
   const int lineH = renderer.getLineHeight(font);
   const int height = padding * 2 + lineH * (1 + CARD_MAX_DEF_LINES);  // headword row + N def lines
 
@@ -980,21 +1007,48 @@ Rect ClipSelectionActivity::cardRect() const {
 }
 
 Rect ClipSelectionActivity::cardAiButtonRect(const Rect& card) const {
+  // Interaction-final: fixed 45x40 visual block, pinned to the card's
+  // bottom-right with the normal padding gutter. No longer sized by the "AI"
+  // label metrics (~25x20) and no longer vertically centered.
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int font = uiScaleSpec().smallFontId;
   const int padding = metrics.menuSpacing;
-  const int labelW = renderer.getTextWidth(font, "AI");
-  const int btnW = labelW + padding * 2;
-  const int btnH = renderer.getLineHeight(font) + padding;
-  const int x = card.x + card.width - padding - btnW;
-  const int y = card.y + (card.height - btnH) / 2;
-  return Rect{x, y, btnW, btnH};
+  const int x = card.x + card.width - padding - CARD_AI_VIS_W;
+  const int y = card.y + card.height - padding - CARD_AI_VIS_H;
+  return Rect{x, y, CARD_AI_VIS_W, CARD_AI_VIS_H};
+}
+
+Rect ClipSelectionActivity::cardAiHitRect(const Rect& card) const {
+  // Hit target is decoupled and larger than the drawing: 60x55 (visual 45x40).
+  // Growth is biased right/down; only CARD_AI_HIT_LEFT_UP=5px goes left/up.
+  //
+  //   hit.x      = vis.x - 5        (5px left, inside the gutter, not text)
+  //   hit.y      = vis.y - 5        (5px up, inside the button's own column)
+  //   hit.right  = vis.right + 10   (right: into the card margin)
+  //   hit.bottom = vis.bottom + 10  (down:  into the card margin)
+  //
+  // With menuSpacing=8 the visual block's right/bottom sit at card.right-8 /
+  // card.bottom-8, so the hit rect ends at card.right+2 / card.bottom+2 —
+  // i.e. ~2px past the card edge. That sliver is card margin, never text.
+  // The text area ends at vis.x-padding = hit.x-3 in drawDefinitionCard, so no
+  // point is ever in both the AI hit rect and the clickable text region.
+  const Rect vis = cardAiButtonRect(card);
+  return Rect{vis.x - CARD_AI_HIT_LEFT_UP, vis.y - CARD_AI_HIT_LEFT_UP, CARD_AI_HIT_W, CARD_AI_HIT_H};
 }
 
 int ClipSelectionActivity::aiButtonAt(const int x, const int y) const {
   if (cardState_ == CardState::Hidden) return -1;
-  const Rect ai = cardAiButtonRect(cardRect());
-  return selectionGeometry::contains(ai, x, y) ? 0 : -1;
+  const Rect card = cardRect();
+  const Rect hit = cardAiHitRect(card);
+  // Three mutually-exclusive regions, checked in this order:
+  //   1) AI hit rect (60x55) -> AI query. Its left edge is vis.x-5; the text
+  //      area is clipped to end at vis.x-padding = hit.x-3, so a point inside
+  //      'hit' can never also be inside the clickable text area.
+  //   2) remaining card body -> full-screen local definition.
+  //   3) outside the card -> cancel.
+  // Because the hit rect is tested FIRST, a tap in the overlap with the card
+  // (which includes the whole visual block and its margin) can only ever fire
+  // AI, never the local dictionary page. No tap can trigger two actions.
+  return selectionGeometry::contains(hit, x, y) ? 0 : -1;
 }
 
 // AI-wire: fire the real 0x1A scene push for the selected word. The host-injected
@@ -1144,7 +1198,11 @@ void ClipSelectionActivity::drawDefinitionCard() const {
   renderer.fillRoundedRect(card.x, card.y, card.width, card.height, metrics.controlRadius, Color::White);
   renderer.drawRoundedRect(card.x, card.y, card.width, card.height, 1, metrics.controlRadius, true);
 
-  // Left/main text area occupies everything except the right AI button column.
+  // Left/main text area occupies everything except the right AI column. It is
+  // unchanged from the baseline: clipped to the VISUAL button's left edge minus
+  // one padding gutter. The decoupled hit rect extends only 5px left into that
+  // gutter (never over a glyph), so text width is identical to the old build —
+  // the enlarged button and larger target cost the definition ZERO width.
   const Rect ai = cardAiButtonRect(card);
   const int textX = card.x + padding;
   const int textY = card.y + padding;
@@ -1161,37 +1219,41 @@ void ClipSelectionActivity::drawDefinitionCard() const {
       renderer.drawText(font, textX, textY, tr(STR_DICT_LOOKING_UP), true, EpdFontFamily::REGULAR);
       break;
     }
-    case CardState::AiPending: {
-      // Ruling: ASCII-only to avoid any CJK glyph dependency. A prewarm call
-      // cannot help if a stripped SD-card font lacks the glyphs entirely —
-      // "AI..." is always renderable on every font, never blank/tofu.
-      renderer.drawText(font, textX, textY, "AI...", true, EpdFontFamily::REGULAR);
-      break;
-    }
+    case CardState::AiPending:
     case CardState::Ready: {
-      // SD-card fonts need glyphs built before drawText; include BOLD for the
-      // headword row (same 0x03 mask the definition viewer uses).
-      if (renderer.isSdCardFont(font)) {
-        renderer.ensureSdCardFontReady(font, cardDefinition_.c_str(), 0x03 /* REGULAR + BOLD */);
-        renderer.ensureSdCardFontReady(font, cardHeadword_.c_str(), 0x03);
-      }
-      // Headword row (bold) — use matched headword, fall back to the selected word.
-      const char* head = cardHeadword_.empty() ? cardWord_.c_str() : cardHeadword_.c_str();
-      renderer.drawText(font, textX, textY, head, true, EpdFontFamily::BOLD);
-      // Flatten RPD1 plain-text definition (\n separated, \x01 headword marker)
-      // into wrapped lines; overflow is ellipsised by wrappedText at N lines.
-      std::string flat;
-      flat.reserve(cardDefinition_.size());
-      for (const char c : cardDefinition_) {
-        if (c == '\x01') continue;  // headword marker — already shown as the bold row
-        flat += (c == '\n' || c == '\r') ? ' ' : c;
-      }
-      const auto lines = renderer.wrappedText(font, flat.c_str(), textW, CARD_MAX_DEF_LINES, EpdFontFamily::REGULAR);
-      int y = textY + lineH;
-      for (const auto& line : lines) {
-        if (y + lineH > card.y + card.height) break;
-        renderer.drawText(font, textX, y, line.c_str(), true, EpdFontFamily::REGULAR);
-        y += lineH;
+      // Interaction-final: during an AI wait the text area KEEPS the local
+      // dictionary definition — the card never goes blank/"AI..."-only. The
+      // busy indicator moved into the AI block itself (see below). A Ready
+      // card and an AiPending card with a cached local def render identically.
+      if (cardHasLocalDef_ && !cardDefinition_.empty()) {
+        // SD-card fonts need glyphs built before drawText; include BOLD for the
+        // headword row (same 0x03 mask the definition viewer uses).
+        if (renderer.isSdCardFont(font)) {
+          renderer.ensureSdCardFontReady(font, cardDefinition_.c_str(), 0x03 /* REGULAR + BOLD */);
+          renderer.ensureSdCardFontReady(font, cardHeadword_.c_str(), 0x03);
+        }
+        // Headword row (bold) — use matched headword, fall back to the selected word.
+        const char* head = cardHeadword_.empty() ? cardWord_.c_str() : cardHeadword_.c_str();
+        renderer.drawText(font, textX, textY, head, true, EpdFontFamily::BOLD);
+        // Flatten RPD1 plain-text definition (\n separated, \x01 headword marker)
+        // into wrapped lines; overflow is ellipsised by wrappedText at N lines.
+        std::string flat;
+        flat.reserve(cardDefinition_.size());
+        for (const char c : cardDefinition_) {
+          if (c == '\x01') continue;  // headword marker — already shown as the bold row
+          flat += (c == '\n' || c == '\r') ? ' ' : c;
+        }
+        const auto lines = renderer.wrappedText(font, flat.c_str(), textW, CARD_MAX_DEF_LINES, EpdFontFamily::REGULAR);
+        int y = textY + lineH;
+        for (const auto& line : lines) {
+          if (y + lineH > card.y + card.height) break;
+          renderer.drawText(font, textX, y, line.c_str(), true, EpdFontFamily::REGULAR);
+          y += lineH;
+        }
+      } else {
+        // No cached local def (e.g. a NotFound card that still fired AI): keep
+        // the literal not-found text, never blank, and never a wait glyph here.
+        renderer.drawText(font, textX, textY, "未找到该词", true, EpdFontFamily::REGULAR);
       }
       break;
     }
@@ -1210,13 +1272,18 @@ void ClipSelectionActivity::drawDefinitionCard() const {
   }
   }  // diag-mtu notice else
 
-  // AI button: busy (inverted) for the whole AiPending window, plus a short
-  // click ack. The button is now live — it fires 0x1A and waits for 0x07.
-  const bool pressed = (cardState_ == CardState::AiPending) || (millis() < aiFeedbackUntil_);
-  renderer.fillRoundedRect(ai.x, ai.y, ai.width, ai.height, metrics.controlRadius, pressed ? Color::Black : Color::White);
+  // AI block (interaction-final): a static light-grey fill + faint border give
+  // an ink-screen affordance (no hover feedback on EPD). During an AI wait it
+  // inverts and shows "AI..." INSIDE the block — the text area keeps the local
+  // definition, so the card is never blank. Ruling: ASCII wait glyph only, so
+  // a stripped SD-card font can never turn it into tofu.
+  const bool waiting = (cardState_ == CardState::AiPending);
+  const bool pressed = waiting || (millis() < aiFeedbackUntil_);
+  renderer.fillRoundedRect(ai.x, ai.y, ai.width, ai.height, metrics.controlRadius,
+                           pressed ? Color::Black : Color::LightGray);
   renderer.drawRoundedRect(ai.x, ai.y, ai.width, ai.height, 1, metrics.controlRadius, true);
-  UITheme::drawCenteredWrappedText(renderer, ai, font, "AI", 1, !pressed, EpdFontFamily::REGULAR,
-                                   UITheme::TextVerticalAlignment::CENTER);
+  UITheme::drawCenteredWrappedText(renderer, ai, font, waiting ? "AI..." : "AI", 1, !pressed,
+                                   EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::CENTER);
 }
 
 void ClipSelectionActivity::drawSelection() const {
