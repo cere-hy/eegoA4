@@ -12,17 +12,17 @@ namespace scenepush {
 namespace {
 std::atomic<bool> s_registered{false};
 
-// next-diag build fingerprint. Every 0x1A emit prints this, so a flashed unit
-// is identifiable from the serial log at a glance. The previous diag-pace
-// build had NO such marker, which is exactly why "pacer missing" could not be
-// distinguished from "old firmware still flashed" in the field report.
-#define DIAG_BUILD_TAG "DIAGPACE2"
+// diag-pace3 build fingerprint. Every 0x1A emit prints this, so a flashed unit
+// is identifiable from the serial log at a glance. DIAGPACE2 was the
+// force-single-frame diagnostic; DIAGPACE3 is the root-cause-fix build (independent
+// mbuf notify + real pacer), with the force-single switch OFF.
+#define DIAG_BUILD_TAG "DIAGPACE3"
 
-// Compile-time diagnostic switch: clamp ctx to the seq0 frame capacity so
-// EVERY query collapses to ONE frame. If word queries then succeed 100%, the
-// multi-frame notify burst is proved to be the failure variable. Temporary —
-// removed when the diagnostic build is retired (验完即弃).
-#define DIAG_FORCE_SINGLE_FRAME 1
+// Force-single-frame diagnostic switch: OFF in this build. The DIAGPACE2 field
+// run already proved the point (single frame 7/7 ok vs old double frame 0/8),
+// so ctx is no longer clamped and the real multi-frame burst is exercised again.
+// Kept as a compile-time constant (not deleted) so it can be re-armed if needed.
+#define DIAG_FORCE_SINGLE_FRAME 0
 
 // diag-pace: a multi-frame 0x1A burst is staged here at emit time. Only seq0
 // goes out inline; the rest are dribbled out by loop() with a >=40 ms wall-clock
@@ -43,6 +43,7 @@ uint8_t s_burstLen[PSC_MAX_FRAMES] = {};
 uint8_t s_burstCount = 0;      // frames in the active burst, 0 = idle
 uint8_t s_burstNext = 0;       // index of the next frame to emit (starts at 1)
 unsigned long s_burstDue = 0;  // millis() deadline for the next frame
+unsigned long s_seq0At = 0;    // millis() when seq0 was queued (gap baseline)
 }  // namespace
 
 void registerEmitter() {
@@ -114,9 +115,9 @@ int emitScene(const char* word, size_t wordLen,
     return 0;
   }
 
-  // Build fingerprint: presence of "build=DIAGPACE2" is the field proof the
-  // next diag image is actually flashed. The prior diag-pace image had no such
-  // marker, so its missing "seq0 sent; staged" log was ambiguous.
+  // Build fingerprint: presence of "build=DIAGPACE3" is the field proof this
+  // root-cause-fix image is actually flashed (DIAGPACE2 was the force-single
+  // diagnostic). A wrong/old image shows a different tag or none at all.
   LOG_INF("SCENE", "0x1A emit build=%s: word='%s' wordLen=%u payloadCtx=%u wordOff=%u flags=0x%02X planFrames=%d",
           DIAG_BUILD_TAG, word, (unsigned)wlen, (unsigned)ctxLen, (unsigned)wordOff, (unsigned)flags, n);
 
@@ -145,17 +146,24 @@ int emitScene(const char* word, size_t wordLen,
 
   // seq0 inline: keeps the existing synchronous success/failure semantics that
   // beginAiQuery() relies on (frames<=0 => no answer expected, don't wait).
-  if (!blepushgatt::sendSceneFrame(s_burst[0], s_burstLen[0])) {
+  // diag-pace3: print the per-frame notify result WITH its sequence number so a
+  // failed/absent second frame is never silent in the field log.
+  const bool seq0ok = blepushgatt::sendSceneFrame(s_burst[0], s_burstLen[0]);
+  const unsigned long seq0At = millis();
+  LOG_INF("SCENE", "0x1A notify %s seq=0/%d len=%u result=%s @%lums",
+          DIAG_BUILD_TAG, encoded, (unsigned)s_burstLen[0], seq0ok ? "queued" : "FAILED", seq0At);
+  if (!seq0ok) {
     LOG_INF("SCENE", "0x1A done: word='%s' frames=0/%d result=seq0-failed", word, encoded);
     return 0;
   }
+  s_seq0At = seq0At;  // baseline for the real inter-frame gap measurement
 
   if (encoded > 1) {
     s_burstCount = static_cast<uint8_t>(encoded);
     s_burstNext = 1;
-    s_burstDue = millis() + kInterFrameGapMs;
+    s_burstDue = seq0At + kInterFrameGapMs;
     LOG_INF("SCENE", "0x1A seq0 sent %s @%lums; staged %d more frame(s), paced >=%lums",
-            DIAG_BUILD_TAG, s_burstDue - kInterFrameGapMs, encoded - 1, kInterFrameGapMs);
+            DIAG_BUILD_TAG, seq0At, encoded - 1, kInterFrameGapMs);
   } else {
     LOG_INF("SCENE", "0x1A done: word='%s' frames=1/1 result=ok (single frame)", word);
   }
@@ -169,20 +177,22 @@ void loop() {
   if (static_cast<long>(millis() - s_burstDue) < 0) return;  // deadline not reached
 
   const uint8_t seq = s_burstNext;
-  if (!blepushgatt::sendSceneFrame(s_burst[seq], s_burstLen[seq])) {
-    LOG_INF("SCENE", "0x1A burst aborted at seq=%u/%u (peer vanished) result=partial",
+  const bool ok = blepushgatt::sendSceneFrame(s_burst[seq], s_burstLen[seq]);
+  const unsigned long sentAt = millis();
+  // diag-pace3: every frame prints its own seq + notify result. A failed or
+  // missing second frame is now explicit in the log, never silent.
+  LOG_INF("SCENE", "0x1A notify %s seq=%u/%d len=%u result=%s @%lums gap_ms=%lu",
+          DIAG_BUILD_TAG, (unsigned)seq, (int)s_burstCount, (unsigned)s_burstLen[seq],
+          ok ? "queued" : "FAILED", sentAt, sentAt - s_seq0At);
+  if (!ok) {
+    LOG_INF("SCENE", "0x1A burst aborted at seq=%u/%u (notify failed) result=partial",
             (unsigned)seq, (unsigned)s_burstCount);
-    s_burstCount = 0;  // drop the rest; peer gone anyway
+    s_burstCount = 0;  // drop the rest; peer gone or enqueue failed
     return;
   }
   ++s_burstNext;
-  const unsigned long sentAt = millis();
-  // Field evidence of the real gap: previous frame's deadline vs this send.
-  // With force-single ON this path never runs (1 frame); flip the macro to 0
-  // to exercise it and read gap_ms directly off the serial log.
-  LOG_INF("SCENE", "0x1A burst %s seq=%u/%u sent@%lums gap_ms=%lu (diag-pace)",
-          DIAG_BUILD_TAG, (unsigned)s_burstNext, (unsigned)s_burstCount,
-          sentAt, sentAt - (s_burstDue - kInterFrameGapMs));
+  // Real inter-frame gap measured against seq0's actual queue time — this is
+  // the field self-proof that pacing happened (expect >= kInterFrameGapMs).
   s_burstDue = sentAt + kInterFrameGapMs;
   if (s_burstNext >= s_burstCount) {
     LOG_INF("SCENE", "0x1A burst done %s: frames=%u/%u result=ok (diag-pace)",

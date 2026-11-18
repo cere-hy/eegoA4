@@ -622,7 +622,11 @@ int EpubReaderActivity::sendAiForCard(const char* selection, size_t selectionLen
   }
 
   const int frames = scenepush::emitScene(anchor.data(), anchor.size(), ctx.data(), ctx.size(), wordOff, flags);
-  LOG_INF("AI", "card AI send: anchor='%s' wordOff=%u ctxLen=%u flags=0x%02X trunc=%d frames=%d",
+  // diag-pace3: these are the values handed to emitScene (pre-emit). With the
+  // force-single clamp OFF, emitScene no longer alters wordOff/ctxLen/flags, so
+  // they equal the actually-sent values; "raw=" disambiguates from the 0x1A
+  // emit-layer line and from the DIAGPACE2 build where they diverged.
+  LOG_INF("AI", "card AI send: anchor='%s' raw_wordOff=%u raw_ctxLen=%u flags=0x%02X trunc=%d frames=%d",
           anchor.c_str(), (unsigned)wordOff, (unsigned)ctx.size(), (unsigned)flags, truncatedOut ? 1 : 0, frames);
   return frames;
 }

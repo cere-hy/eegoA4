@@ -224,22 +224,17 @@ bool canNotifyScene() {
 }
 
 bool sendSceneFrame(const uint8_t* frame, size_t len) {
-  // diag-mtu: a 0x1A frame is 241 B. NimBLE 2.5.1 silently truncates an ATT
-  // notify to (MTU-3) in ble_att_truncate_to_mtu() and still returns success —
-  // so "notify() returned true" used to masquerade as "frame delivered whole".
-  // Self-check BEFORE sending: if the frame cannot fit the negotiated MTU,
-  // refuse (return false) and shout, never claim success. This is a bug fix,
-  // not a protocol change: frame/flags/notify characteristic are untouched.
+  // diag-pace3 (root-cause fix): a 0x1A frame is 241 B. NimBLE 2.5.1 silently
+  // truncates an ATT notify to (MTU-3) in ble_att_truncate_to_mtu() and still
+  // returns success — so "notify() returned true" used to masquerade as "frame
+  // delivered whole". Self-check BEFORE sending: if the frame cannot fit the
+  // negotiated MTU, refuse (return false) and shout, never claim success.
   constexpr size_t kSceneFrameMax = 241;
   if (!canNotifyScene() || frame == nullptr || len == 0 || len > kSceneFrameMax) return false;
 
   const uint16_t mtu = s_status.mtu;
   const size_t capacity = (mtu > 3) ? (static_cast<size_t>(mtu) - 3u) : 0u;
   const size_t wire = (len < capacity) ? len : capacity;  // = min(len, mtu-3)
-
-  // (4) wire bytes actually handed to ATT vs min(len, mtu-3).
-  log("scene notify len=%u wire=%u cap=%u mtu=%u",
-      (unsigned)len, (unsigned)wire, (unsigned)capacity, (unsigned)mtu);
 
   // (5) truncation warning + MTU self-check: refuse instead of pretending success.
   if (len > capacity) {
@@ -248,13 +243,31 @@ bool sendSceneFrame(const uint8_t* frame, size_t len) {
     return false;
   }
 
-  s_statusChr->setValue(const_cast<uint8_t*>(frame), len);
-  // (6) failure warning: notify() returning false is now visible on the console.
-  if (!s_statusChr->notify()) {
-    log("WARN scene notify failed len=%u mtu=%u", (unsigned)len, (unsigned)mtu);
-    return false;
+  // ROOT-CAUSE FIX (diag-pace3): the old path did setValue(frame) then a no-arg
+  // notify(). No-arg notify() ends in ble_gatts_chr_updated(), a *marker* on the
+  // characteristic's shared value buffer: two frames within one connection
+  // event overwrite that buffer and the markers coalesce -> only one frame on
+  // air (exactly the 1ms back-to-back / 100% double-frame failure seen in the
+  // field). The value+len+connHandle overload instead calls
+  // ble_hs_mbuf_from_flat() per frame -> ble_gattc_notify_custom(): a *separate*
+  // mbuf queued per frame, no shared buffer, no coalescing. Protocol/B3/0x07
+  // untouched — this is a send-mechanism bug fix, not a protocol change.
+  uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
+  if (s_server != nullptr) {
+    const auto peers = s_server->getPeerDevices();
+    if (!peers.empty()) conn = peers.front();
   }
-  return true;
+  const bool ok = s_statusChr->notify(frame, len, conn);
+
+  // (6) per-frame observability: every notify prints its own result + conn +
+  // wire bytes. A failed enqueue or a truncated send is never silent again.
+  log("scene notify conn=%u len=%u wire=%u cap=%u mtu=%u result=%s",
+      (unsigned)conn, (unsigned)len, (unsigned)wire, (unsigned)capacity, (unsigned)mtu,
+      ok ? "queued" : "FAILED");
+  if (!ok) {
+    log("WARN scene notify FAILED len=%u mtu=%u conn=%u", (unsigned)len, (unsigned)mtu, (unsigned)conn);
+  }
+  return ok;
 }
 
 }  // namespace blepushgatt
