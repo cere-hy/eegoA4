@@ -63,6 +63,12 @@ class ClipSelectionActivity final : public Activity {
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }
   bool handleHomeGesture() override;
+  // diag-fullspeed: while a 0x07 answer is pending, keep the CPU at full speed
+  // (main loop refreshes lastActivityTime + setPowerSaving(false) whenever the
+  // foreground activity reports preventAutoSleep). Activity-private, so it can
+  // never be cleared by the radio layer's holdsCpu writes, and it releases
+  // itself as soon as aiWaiting_ flips false on answer / timeout / exit.
+  bool preventAutoSleep() override { return aiWaiting_; }
 
  private:
   struct WordBox {

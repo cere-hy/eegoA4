@@ -4,6 +4,7 @@
 #include <BlePushGatt.h>  // diag-mtu: negotiated MTU for the footer ASCII line
 #include <ScenePush.h>  // B4′: long-press → 0x1A scene notify
 #include <push_scene.h>  // B4′: PSC_CTX_MAX from white-paper §2.1 (no hardcoding)
+#include <push_ai_result.h>  // diag-cut: PAR_DEF_EFF_MAX (0x07 def slot, read-only)
 #include <Epub/Page.h>
 #include <Epub/blocks/TextBlock.h>
 #include <FontCacheManager.h>
@@ -60,6 +61,22 @@
 #include "util/ScreenshotUtil.h"
 
 namespace {
+
+// diag-cut: strip ASCII punctuation from the AI page header headword so it
+// reads "AI Ultimately" instead of "AI Ultimately," (APK echoes the selected
+// token verbatim, comma included). UTF-8 multibyte is left untouched — only
+// ASCII punctuation/whitespace at either end is trimmed. No CJK glyphs added.
+std::string cleanAiHeaderWord(const std::string& in) {
+  const auto isAsciiPunct = [](unsigned char c) {
+    return (c >= 0x21u && c <= 0x2Fu) || (c >= 0x3Au && c <= 0x40u) ||
+           (c >= 0x5Bu && c <= 0x60u) || (c >= 0x7Bu && c <= 0x7Eu) || c == ' ' || c == '\t';
+  };
+  size_t b = 0;
+  size_t e = in.size();
+  while (b < e && isAsciiPunct(static_cast<unsigned char>(in[b]))) ++b;
+  while (e > b && isAsciiPunct(static_cast<unsigned char>(in[e - 1]))) --e;
+  return in.substr(b, e - b);
+}
 // The X4 Pro and X4 Classic carry the X4's panel but sit outside isXteinkDevice()
 // (that helper also gates power management). Overlay refresh choices are per-panel:
 // this family runs the grayscale anti-aliasing pass, so chrome painted over a
@@ -694,17 +711,26 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
         requestUpdate();
         return;
       }
-      std::string header = ai.truncated ? "AI [CUT] " : "AI ";
-      header += ai.headword;
-      auto viewer = makeUniqueNoThrow<DictionaryDefinitionActivity>(renderer, mappedInput, std::move(header),
-                                                                    ai.definition, /*htmlDefinition=*/false);
+      // diag-cut: clean header "AI <word>" — strip ASCII punctuation from the
+      // echoed anchor ("AI Ultimately," -> "AI Ultimately"), and drop the old
+      // "[CUT]" prefix. The truncation marker now lives at the PAGE END.
+      const std::string header = std::string("AI ") + cleanAiHeaderWord(ai.headword);
+      // diag-cut: dlen 顶格 169 => APK fitUtf8() hard-capped the definition in
+      // the fixed 0x07 def slot. APK writes no NUL inside the def bytes, so
+      // strlen(def)==dlen and size()>=PAR_DEF_EFF_MAX is exactly the 顶格判据.
+      // Mark it with a page-end ASCII line (no CJK glyph risk).
+      std::string body = ai.definition;
+      const bool defCapped = body.size() >= PAR_DEF_EFF_MAX;
+      if (defCapped) body += "\n...[cut]";
+      auto viewer = makeUniqueNoThrow<DictionaryDefinitionActivity>(renderer, mappedInput, header,
+                                                                    std::move(body), /*htmlDefinition=*/false);
       if (!viewer) {
         LOG_ERR("AI", "OOM: full-screen AI definition viewer");
         requestUpdate();
         return;
       }
-      LOG_INF("AI", "launch full-screen AI def page: headword='%s' bytes=%u truncated=%d",
-              ai.headword.c_str(), (unsigned)ai.definition.size(), ai.truncated ? 1 : 0);
+      LOG_INF("AI", "launch full-screen AI def page: headword='%s' bytes=%u defCapped=%d",
+              ai.headword.c_str(), (unsigned)ai.definition.size(), defCapped ? 1 : 0);
       startActivityForResult(std::move(viewer), nullptr);
       return;
     }

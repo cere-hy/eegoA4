@@ -2,6 +2,7 @@
 #include <BlePageTurner.h>
 #include <AiResultSink.h>
 #include <BlePushGatt.h>
+#include <ScenePush.h>  // diag-pace: non-blocking pacer for multi-frame 0x1A bursts
 #include <BoardConfig.h>
 #include <Epub.h>
 #include <FontCacheManager.h>
@@ -859,6 +860,9 @@ void loop() {
   // clear stale receive flags. No display work — the status icon rides the next
   // normal full-frame render via g_bleConnected.
   blepushgatt::loop();
+  // diag-pace: emit the remaining 0x1A burst frames, >=40 ms apart. One frame
+  // per iteration at most, instant no-op between deadlines — never blocks UI.
+  scenepush::loop();
   // B5: consume the latest 0x07 definition frame (decode + append/reflow +
   // hex留证). Cheap no-op when no frame pending; never blocks the loop.
   aireceivesink::pump();

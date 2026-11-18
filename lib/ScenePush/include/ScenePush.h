@@ -28,6 +28,13 @@ void registerEmitter();
 void unregisterEmitter();
 bool isRegistered();
 
+// diag-pace: main-loop pacer for multi-frame scene bursts. emitScene() encodes
+// the whole burst and sends seq0 immediately; every remaining frame is sent by
+// this pump, paced >=40 ms apart. MUST be called once per main-loop iteration
+// (next to blepushgatt::loop()). It never blocks: if the gap has not elapsed it
+// returns at once, so UI refresh / input sampling keep their normal cadence.
+void loop();
+
 // Push one long-press scene. No-op (returns 0) when not registered, no peer,
 // or invalid input. `word` is UTF-8 (already the selected token); `ctx` is the
 // visible sentence/line text; `wordOff` is the byte offset of `word` within

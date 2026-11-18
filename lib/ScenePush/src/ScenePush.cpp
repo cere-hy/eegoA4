@@ -5,10 +5,32 @@
 #include <push_scene.h>
 #include <Logging.h>
 
+#include <Arduino.h>  // millis() for the non-blocking inter-frame gap
+
 namespace scenepush {
 
 namespace {
 std::atomic<bool> s_registered{false};
+
+// diag-pace: a multi-frame 0x1A burst is staged here at emit time. Only seq0
+// goes out inline; the rest are dribbled out by loop() with a >=40 ms wall-clock
+// gap. This is the fix candidate for "first send fails, resend works" (two
+// back-to-back setValue()+notify() calls with zero spacing).
+//
+// Why NOT a literal delay(40) inside emitScene's for-loop: emitScene runs on
+// the main loop (called from the card's AI button handler inside the activity
+// loop). A blocking delay(40) per frame would freeze UI refresh and input
+// sampling for up to (N-1)*40 ms. Instead the gap is expressed as a deadline
+// checked by loop() once per iteration: unexpired -> return immediately (the
+// main loop keeps rendering and sampling input), expired -> send exactly one
+// frame and re-arm. No task is ever blocked; the 40 ms is elapsed wall time,
+// not busy-wait.
+constexpr unsigned long kInterFrameGapMs = 40;
+uint8_t s_burst[PSC_MAX_FRAMES][PSC_FRAME_MAX];  // staged frames (seq0..N-1)
+uint8_t s_burstLen[PSC_MAX_FRAMES] = {};
+uint8_t s_burstCount = 0;      // frames in the active burst, 0 = idle
+uint8_t s_burstNext = 0;       // index of the next frame to emit (starts at 1)
+unsigned long s_burstDue = 0;  // millis() deadline for the next frame
 }  // namespace
 
 void registerEmitter() {
@@ -59,21 +81,68 @@ int emitScene(const char* word, size_t wordLen,
   LOG_INF("SCENE", "0x1A emit: opcode=0x1A word='%s' wordLen=%u payloadCtx=%u wordOff=%u flags=0x%02X planFrames=%d",
           word, (unsigned)wlen, (unsigned)ctxLen, (unsigned)wordOff, (unsigned)flags, n);
 
-  uint8_t frame[PSC_FRAME_MAX];
-  int sent = 0;
-  // seq starts at 0 on every scene: the peer treats seq==0 as the session
+  // diag-pace: encode every frame into the staging buffer up front (pure CPU,
+  // no BLE), then send seq0 inline. Remaining frames are emitted by loop().
+  // seq starts at 0 on every burst: the peer treats seq==0 as the session
   // boundary (white-paper §2.1), so no cross-burst sequence state is kept.
+  int encoded = 0;
   for (int seq = 0; seq < n; ++seq) {
     const size_t wrote = psc_frame_encode(
         static_cast<uint16_t>(seq), wordBuf, wlen, wordOff, flags,
-        c, ctxLen, &plan, frame);
+        c, ctxLen, &plan, s_burst[seq]);
     if (wrote == 0) break;
-    if (!blepushgatt::sendSceneFrame(frame, wrote)) break;  // peer vanished mid-burst
-    ++sent;
+    s_burstLen[seq] = static_cast<uint8_t>(wrote);
+    ++encoded;
   }
-  LOG_INF("SCENE", "0x1A done: word='%s' frames=%d/%d result=%s",
-          word, sent, n, sent == n ? "ok" : "partial/failed");
-  return sent;
+  if (encoded == 0) {
+    LOG_INF("SCENE", "0x1A done: word='%s' frames=0/%d result=encode-failed", word, n);
+    return 0;
+  }
+
+  // Cancel any prior burst still in flight (a new scene is a new session).
+  s_burstCount = 0;
+  s_burstNext = 0;
+  s_burstDue = 0;
+
+  // seq0 inline: keeps the existing synchronous success/failure semantics that
+  // beginAiQuery() relies on (frames<=0 => no answer expected, don't wait).
+  if (!blepushgatt::sendSceneFrame(s_burst[0], s_burstLen[0])) {
+    LOG_INF("SCENE", "0x1A done: word='%s' frames=0/%d result=seq0-failed", word, encoded);
+    return 0;
+  }
+
+  if (encoded > 1) {
+    s_burstCount = static_cast<uint8_t>(encoded);
+    s_burstNext = 1;
+    s_burstDue = millis() + kInterFrameGapMs;
+    LOG_INF("SCENE", "0x1A seq0 sent; staged %d more frame(s), paced >=%lums gap (diag-pace)",
+            encoded - 1, kInterFrameGapMs);
+  } else {
+    LOG_INF("SCENE", "0x1A done: word='%s' frames=1/1 result=ok (single frame)", word);
+  }
+  return encoded;
+}
+
+void loop() {
+  // Non-blocking pacer. One frame at most per main-loop iteration. Nothing to
+  // do (or gap not elapsed) returns instantly — no delay(), no busy-wait.
+  if (s_burstCount == 0 || s_burstNext >= s_burstCount) return;
+  if (static_cast<long>(millis() - s_burstDue) < 0) return;  // deadline not reached
+
+  const uint8_t seq = s_burstNext;
+  if (!blepushgatt::sendSceneFrame(s_burst[seq], s_burstLen[seq])) {
+    LOG_INF("SCENE", "0x1A burst aborted at seq=%u/%u (peer vanished) result=partial",
+            (unsigned)seq, (unsigned)s_burstCount);
+    s_burstCount = 0;  // drop the rest; peer gone anyway
+    return;
+  }
+  ++s_burstNext;
+  s_burstDue = millis() + kInterFrameGapMs;
+  if (s_burstNext >= s_burstCount) {
+    LOG_INF("SCENE", "0x1A burst done: frames=%u/%u result=ok (diag-pace, >=%lums gap)",
+            (unsigned)s_burstNext, (unsigned)s_burstCount, kInterFrameGapMs);
+    s_burstCount = 0;
+  }
 }
 
 }  // namespace scenepush
