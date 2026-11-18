@@ -14,6 +14,7 @@
 #include <esp_mac.h>
 #include <esp_system.h>
 #include <Logging.h>
+#include <push_ai_seg.h>  // plan B: 0x08/0x18/0x13 opcodes + caps encoder
 
 #include <cstdarg>
 #include <cstdio>
@@ -30,12 +31,17 @@ const char* kStatusUuid = "e2f5a1c0-9b7d-4e3f-8a61-3c9d2b7e5f13";
 std::atomic<bool> g_bleConnected{false};
 std::atomic<bool> g_bleReceiving{false};
 
+// plan B: defined at namespace scope below (not in the anonymous namespace),
+// so the forward declaration must live here too for onSubscribe() to link.
+bool sendStatusFrame(const uint8_t* frame, size_t len);
+
 namespace {
 
 Status s_status;
 DataHandler s_dataHandler = nullptr;
 CtrlHandler s_ctrlHandler = nullptr;
 AiResultHandler s_aiResultHandler = nullptr;  // B5: dedicated 0x07 consumer
+AiSegHandler s_aiSegHandler = nullptr;        // plan B: dedicated 0x08 consumer
 NimBLEServer* s_server = nullptr;
 NimBLECharacteristic* s_data = nullptr;
 NimBLECharacteristic* s_ctrl = nullptr;
@@ -50,6 +56,7 @@ constexpr uint8_t kOpBegin = 0x01;
 constexpr uint8_t kOpEnd = 0x02;
 constexpr uint8_t kOpAbort = 0x04;
 constexpr uint8_t kOpAiResult = 0x07;  // B5: 0x07 single-frame AI definition
+constexpr uint8_t kOpAiResultSeg = 0x08;  // plan B: 0x08 segmented AI definition
 
 constexpr uint16_t kPreferredMtu = 247;
 
@@ -88,6 +95,13 @@ class CtrlCallbacks : public NimBLECharacteristicCallbacks {
       if (s_aiResultHandler) s_aiResultHandler(p, n);
       return;
     }
+    if (op == kOpAiResultSeg) {
+      // Plan B: 0x08 is a segmented AI-definition frame (241B, whole frame
+      // incl. 4B CTRL header). Hand the raw frame to the dedicated reassembler
+      // sink; never leak to the 0x07 handler or B6.5 CtrlHandler.
+      if (s_aiSegHandler) s_aiSegHandler(p, n);
+      return;
+    }
     if (op == kOpBegin) {
       g_bleReceiving.store(true, std::memory_order_release);
     } else if (op == kOpEnd || op == kOpAbort) {
@@ -115,6 +129,18 @@ class StatusCallbacks : public NimBLECharacteristicCallbacks {
     const bool subscribed = (subValue & 0x0001u) != 0;
     s_statusSubscribed.store(subscribed, std::memory_order_release);
     log("STATUS cccd sub=%u", static_cast<unsigned>(subscribed));
+    // Plan B REQ3: advertise CAP_AI_MULTI in the SAME connection event the peer
+    // subscribes, so devCaps is set before any AI query can be tapped. Without
+    // this bit the APK keeps sending 0x07 short frames (169B truncation).
+    if (subscribed) {
+      uint8_t caps[5];
+      const size_t n = pas_caps_encode(PAS_CAP_AI_MULTI, caps, sizeof(caps));
+      if (n && sendStatusFrame(caps, n)) {
+        log("STATUS 0x18 caps=0x%x sent (CAP_AI_MULTI)", (unsigned)PAS_CAP_AI_MULTI);
+      } else {
+        log("WARN STATUS 0x18 caps send FAILED");
+      }
+    }
   }
 };
 
@@ -215,6 +241,7 @@ const Status& status() { return s_status; }
 void setDataHandler(DataHandler h) { s_dataHandler = h; }
 void setCtrlHandler(CtrlHandler h) { s_ctrlHandler = h; }
 void setAiResultHandler(AiResultHandler h) { s_aiResultHandler = h; }
+void setAiSegHandler(AiSegHandler h) { s_aiSegHandler = h; }
 bool radioOwned() { return s_status.initialized; }
 
 bool canNotifyScene() {
@@ -270,6 +297,21 @@ bool sendSceneFrame(const uint8_t* frame, size_t len) {
   return ok;
 }
 
+bool sendStatusFrame(const uint8_t* frame, size_t len) {
+  // Plan B: 0x18 CAPS / 0x13 ERR are tiny STATUS notifies. Same independent-mbuf
+  // path as sendSceneFrame (no setValue, no shared-buffer marker semantics).
+  if (!canNotifyScene() || frame == nullptr || len == 0 || len > PAS_ST_MAX) return false;
+  uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
+  if (s_server != nullptr) {
+    const auto peers = s_server->getPeerDevices();
+    if (!peers.empty()) conn = peers.front();
+  }
+  const bool ok = s_statusChr->notify(frame, len, conn);
+  log("status notify op=0x%02X len=%u conn=%u result=%s",
+      (unsigned)frame[0], (unsigned)len, (unsigned)conn, ok ? "queued" : "FAILED");
+  return ok;
+}
+
 }  // namespace blepushgatt
 
 #else  // non-EEGO-A4 or peripheral role disabled: inert stubs
@@ -289,9 +331,11 @@ uint16_t tokenFromStaMac() { return 0; }
 void setDataHandler(DataHandler) {}
 void setCtrlHandler(CtrlHandler) {}
 void setAiResultHandler(AiResultHandler) {}
+void setAiSegHandler(AiSegHandler) {}
 bool radioOwned() { return false; }
 bool sendSceneFrame(const uint8_t*, size_t) { return false; }
 bool canNotifyScene() { return false; }
+bool sendStatusFrame(const uint8_t*, size_t) { return false; }
 }  // namespace blepushgatt
 
 #endif

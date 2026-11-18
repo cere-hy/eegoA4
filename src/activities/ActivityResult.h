@@ -64,6 +64,10 @@ struct AiDefinitionResult {
   std::string headword;
   std::string definition;
   bool truncated = false;
+  // Plan B: 0x08 reassembly failure (0=none, 1=REJECT, 2=OVERFLOW, 3=DECODE).
+  // When nonzero the reader shows an explicit local prompt instead of an empty
+  // page or a 15s silent timeout (REQ2). ABI-compatible: appended field.
+  int segError = 0;
 };
 
 // Local RPD1 definition handed from the selection card to the reader when the

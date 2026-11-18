@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
+#include <cstring>
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
@@ -1041,28 +1042,50 @@ void ClipSelectionActivity::beginAiQuery() {
 // and replace the card body. A strictly newer generation is the ceiling guard;
 // the timeout guarantees the card can never stay blank/stuck.
 void ClipSelectionActivity::pollAiResult() {
+  // Plan B REQ2: surface a 0x08 reassembly failure IMMEDIATELY (no silent 15s
+  // wait). takeSegError() is generation-deduped; the full-screen page shows a
+  // local prompt from segError.
+  aireceivesink::SegErrorInfo segErr;
+  if (aireceivesink::takeSegError(&segErr)) {
+    aiWaiting_ = false;
+    LOG_INF("AI", "card AI seg error=%u gen=%u after %lums -> explicit prompt page",
+            (unsigned)segErr.code, segErr.generation, millis() - aiQueryStartMs_);
+    ActivityResult result;
+    AiDefinitionResult aiResult;
+    aiResult.headword = cardHeadword_.empty() ? cardWord_ : cardHeadword_;
+    aiResult.definition.clear();
+    aiResult.truncated = false;
+    aiResult.segError = static_cast<int>(segErr.code);
+    result.data = std::move(aiResult);
+    setResult(std::move(result));
+    finish();
+    return;
+  }
+
   char word[64] = {};
-  char def[512] = {};
+  // Plan B: heap-backed (std::string) so an 8192B reassembled def never sits on
+  // the 8KB activity stack. Was `char def[512]` (a hard truncation point).
+  std::string def;
+  def.resize(aireceivesink::AI_FULL_DEF_MAX);
   uint32_t generation = aiWaitBaseGen_;
-  // Use latestFrame() (single 0x07 answer), NOT latest() which returns the
-  // append/reflow history — the card replaces its body with exactly one def.
-  if (aireceivesink::latestFrame(word, sizeof(word), def, sizeof(def), &generation) &&
+  // Use latestFrame() (single 0x07 answer OR reassembled 0x08 full def), NOT
+  // latest() which returns the append/reflow history.
+  if (aireceivesink::latestFrame(word, sizeof(word), &def[0], def.size(), &generation) &&
       generation > aiWaitBaseGen_) {
     const unsigned long elapsed = millis() - aiQueryStartMs_;
     aiWaiting_ = false;
+    def.resize(std::strlen(def.c_str()));  // trim to actual bytes
     LOG_INF("AI", "card AI result gen=%u word='%s' bytes=%u in %lums -> full-screen AI def page (truncated=%d)",
-            generation, word[0] ? word : cardWord_.c_str(), (unsigned)cardDefinition_.size(), elapsed,
+            generation, word[0] ? word : cardWord_.c_str(), (unsigned)def.size(), elapsed,
             aiCtxTruncated_ ? 1 : 0);
-    // AI result goes to a full-screen paged reader, not the small card (the
-    // 144–176-char answer cannot fit in 4 card lines). Hand it to the reader
-    // via result; the reader launches DictionaryDefinitionActivity so that its
-    // parent is the reader itself -> Back returns to the exact reading position,
-    // never to this card. Timeout/failure still calls restoreLocalDef() below.
+    // AI result goes to a full-screen paged reader, not the small card. Hand it
+    // via result; the reader launches DictionaryDefinitionActivity so its parent
+    // is the reader -> Back returns to the exact reading position.
     ActivityResult result;
     AiDefinitionResult aiResult;
     aiResult.headword = word[0] ? word : cardHeadword_;
     if (aiResult.headword.empty()) aiResult.headword = cardWord_;
-    aiResult.definition = def;
+    aiResult.definition = std::move(def);
     aiResult.truncated = aiCtxTruncated_;
     result.data = std::move(aiResult);
     setResult(std::move(result));

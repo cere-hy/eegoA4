@@ -4,7 +4,6 @@
 #include <BlePushGatt.h>  // diag-mtu: negotiated MTU for the footer ASCII line
 #include <ScenePush.h>  // B4′: long-press → 0x1A scene notify
 #include <push_scene.h>  // B4′: PSC_CTX_MAX from white-paper §2.1 (no hardcoding)
-#include <push_ai_result.h>  // diag-cut: PAR_DEF_EFF_MAX (0x07 def slot, read-only)
 #include <Epub/Page.h>
 #include <Epub/blocks/TextBlock.h>
 #include <FontCacheManager.h>
@@ -711,30 +710,39 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
     // the Chinese definition body is preloaded by DDA::prepareFont().
     if (std::holds_alternative<AiDefinitionResult>(result.data)) {
       const auto& ai = std::get<AiDefinitionResult>(result.data);
+      // Plan B REQ2: 0x08 reassembly failure → explicit local prompt (no silent
+      // empty page / 15s timeout). Keep it ASCII-safe where possible: CJK uses
+      // the SD font fallback prepared by DDA, same as any Chinese definition.
+      if (ai.segError != 0) {
+        std::string prompt = ai.segError == 2
+            ? "AI definition too long. Please shorten the selection."
+            : "AI definition failed. Please retry.";
+        auto msg = makeUniqueNoThrow<DictionaryDefinitionActivity>(
+            renderer, mappedInput, std::string("AI "), std::move(prompt),
+            /*htmlDefinition=*/false);
+        if (!msg) { requestUpdate(); return; }
+        LOG_INF("AI", "launch AI seg-error prompt: segError=%d", ai.segError);
+        startActivityForResult(std::move(msg), nullptr);
+        return;
+      }
       if (ai.definition.empty()) {
         requestUpdate();
         return;
       }
-      // diag-cut: clean header "AI <word>" — strip ASCII punctuation from the
-      // echoed anchor ("AI Ultimately," -> "AI Ultimately"), and drop the old
-      // "[CUT]" prefix. The truncation marker now lives at the PAGE END.
+      // Plan B: 0x08 delivers the FULL definition (up to 8192B) — no 169B
+      // slot cap, so the old diag-cut `...[cut]` marker is removed. A genuine
+      // 0x07 short frame (<169B) never sets it either. Header stays "AI <word>"
+      // with ASCII punctuation stripped.
       const std::string header = std::string("AI ") + cleanAiHeaderWord(ai.headword);
-      // diag-cut: dlen 顶格 169 => APK fitUtf8() hard-capped the definition in
-      // the fixed 0x07 def slot. APK writes no NUL inside the def bytes, so
-      // strlen(def)==dlen and size()>=PAR_DEF_EFF_MAX is exactly the 顶格判据.
-      // Mark it with a page-end ASCII line (no CJK glyph risk).
-      std::string body = ai.definition;
-      const bool defCapped = body.size() >= PAR_DEF_EFF_MAX;
-      if (defCapped) body += "\n...[cut]";
       auto viewer = makeUniqueNoThrow<DictionaryDefinitionActivity>(renderer, mappedInput, header,
-                                                                    std::move(body), /*htmlDefinition=*/false);
+                                                                    ai.definition, /*htmlDefinition=*/false);
       if (!viewer) {
         LOG_ERR("AI", "OOM: full-screen AI definition viewer");
         requestUpdate();
         return;
       }
-      LOG_INF("AI", "launch full-screen AI def page: headword='%s' bytes=%u defCapped=%d",
-              ai.headword.c_str(), (unsigned)ai.definition.size(), defCapped ? 1 : 0);
+      LOG_INF("AI", "launch full-screen AI def page: headword='%s' bytes=%u",
+              ai.headword.c_str(), (unsigned)ai.definition.size());
       startActivityForResult(std::move(viewer), nullptr);
       return;
     }

@@ -23,7 +23,27 @@
 //     persistent advertising); pump() is a cheap no-op when no frame pending.
 namespace aireceivesink {
 
+// Plan B: reassembled full definition capacity (0x08 path). 8192B per the
+// whitepaper; a reassembled definition larger than this OVERFLOWs.
+constexpr size_t AI_FULL_DEF_MAX = 8192u;
+
+// Plan B failure reason for a 0x08 segmented definition. APP 不监听释义回执
+// (REQ2 定案)：错误必须走设备本地 UI，由 pollAiResult 读 lastError 立即提示，
+// 不静默等满 15s 超时。
+enum class SegError : uint8_t {
+  NONE = 0,
+  REJECT,    // 乱序 / 词变 / total 变
+  OVERFLOW,  // 超 8192B
+  DECODE,    // 0x08 帧解码失败（坏帧）
+};
+
+struct SegErrorInfo {
+  SegError code = SegError::NONE;
+  uint32_t generation = 0;  // 触发错误的帧代际（去重用）
+};
+
 // Idempotent. Creates the double-slot ring and registers the CTRL 0x07 hook.
+// Plan B: also registers the CTRL 0x08 segmented hook.
 // Safe to call once from setup after blepushgatt::begin().
 void init();
 
@@ -45,6 +65,17 @@ bool latest(char* word, size_t wordCap, char* text, size_t textCap,
 // append/reflow history. Copies into caller buffers; returns false if none yet.
 bool latestFrame(char* word, size_t wordCap, char* def, size_t defCap,
                  uint32_t* generation);
+
+// Plan B: consume and clear the latest 0x08 segmented error, if any. Returns
+// true and fills `out` when a new error arrived since the last call; the reader
+// must call this BEFORE latestFrame() so a REJECT/OVERFLOW surfaces an explicit
+// prompt instead of silently waiting out the 15s timeout. Generation guards
+// against double-reporting the same error.
+bool takeSegError(SegErrorInfo* out);
+
+// Plan B: drop any in-flight reassembly (call on disconnect / CCCD off so a
+// half-collected definition never splices into the next query).
+void resetSegmentation();
 
 // Diagnostics counters (audit).
 struct Stats {

@@ -66,6 +66,13 @@ void setCtrlHandler(CtrlHandler h);
 using AiResultHandler = void (*)(const uint8_t* frame, size_t len);
 void setAiResultHandler(AiResultHandler h);
 
+// Plan B: dedicated hook for the 0x08 AI-definition SEGMENTED result (CTRL
+// write, opcode at offset 2). Same host-task/short-copy discipline as 0x07,
+// kept as a separate handler so the single-frame 0x07 path stays untouched.
+// Fired once per 241B segmented frame; the sink feeds its reassembler.
+using AiSegHandler = void (*)(const uint8_t* frame, size_t len);
+void setAiSegHandler(AiSegHandler h);
+
 // True while the push peripheral owns the single radio; the HID page-turner
 // central must refuse to start in that window (§7 connection exclusivity).
 bool radioOwned();
@@ -76,5 +83,11 @@ bool radioOwned();
 // this. The caller owns the frame buffer; notify is fire-and-forget.
 bool sendSceneFrame(const uint8_t* frame, size_t len);
 bool canNotifyScene();
+
+// Plan B: notify a pre-encoded STATUS frame (e.g. 0x18 CAPS / 0x13 ERR) up the
+// same STATUS(..13) NOTIFY characteristic via an independent mbuf (no shared
+// value buffer). Sent automatically on CCCD subscribe for 0x18; exposed so the
+// sink can also emit an explicit failure status. No-op when no link/subscribe.
+bool sendStatusFrame(const uint8_t* frame, size_t len);
 
 }  // namespace blepushgatt
