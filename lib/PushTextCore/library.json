@@ -1,0 +1,15 @@
+{
+  "name": "PushTextCore",
+  "version": "0.1.0",
+  "description": "B6.5 S1 trimmed pure core for phone BLE TEXT push: BEGIN/DATA/CTRL/STATUS codec + CRC32 + session machine + hardware-free glue. Resume/transactional-commit/cooldown and all AI/TTS/caps frames intentionally dropped.",
+  "keywords": "ble, push, text, codec, crc32, eego-a4, trimmed",
+  "authors": {
+    "name": "eegoA4-rebuild",
+    "email": "rebuild@local"
+  },
+  "license": "Apache-2.0",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  }
+}
