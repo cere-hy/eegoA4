@@ -2,6 +2,7 @@
 #include <BlePageTurner.h>
 #include <AiResultSink.h>
 #include <BlePushGatt.h>
+#include <PushTextSink.h>  // B6.5 S2: text-push GATT glue (BEGIN→READY handshake)
 #include <ScenePush.h>  // diag-pace: non-blocking pacer for multi-frame 0x1A bursts
 #include <BoardConfig.h>
 #include <Epub.h>
@@ -685,6 +686,10 @@ void setup() {
   // Advertising/link state only ever reaches the UI as ordinary frame content
   // (g_bleConnected is read at the next normal render) — never a repaint here.
   blepushgatt::begin();
+  // B6.5 S2: bridge PushTextCore onto the push CTRL/DATA hooks. Registers the
+  // sink handler for 0x01–0x05; a BEGIN yields READY — the APK's wait signal.
+  // 0x07/0x08 keep their dedicated AI hooks (set below), untouched.
+  pushtextsink::init();
   // B5: arm the 0x07 AI-definition receive hook (double-slot ring + main-loop
   // pump). Persistent like B3 advertising, independent of any reader page.
   aireceivesink::init();

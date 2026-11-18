@@ -1,0 +1,13 @@
+{
+  "name": "PushTextSink",
+  "version": "0.1.0",
+  "description": "B6.5 S2 text-push GATT glue: bridges PushTextCore onto BlePushGatt CTRL/DATA hooks, emits READY/RESUME/DONE/ERR/PROGRESS via independent-mbuf STATUS notify. No filesystem, no B3 changes.",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  },
+  "dependencies": {
+    "BlePushGatt": "*",
+    "PushTextCore": "*"
+  }
+}
