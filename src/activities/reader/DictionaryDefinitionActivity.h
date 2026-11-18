@@ -95,6 +95,12 @@ class DictionaryDefinitionActivity final : public Activity {
   bool layoutHtmlPages(Definition& next);
   bool wrapText(Definition& next);
   bool prepareFont(std::string& definition, int fontId);
+  // Full-screen definition pages render one step above the reader body (16pt
+  // vs 14pt default) without touching the shared reader font setting. Resolves
+  // a 16pt variant of the active reader font through the renderer's variant
+  // provider (built-in Noto 14->16 and vector TTF at any size both supported);
+  // falls back to the base id if no variant is available.
+  int definitionFontId() const;
   bool reserveLines(Definition& next, size_t count);
   int measureSpan(int fontId, const char* text, size_t len, EpdFontFamily::Style family = EpdFontFamily::REGULAR) const;
   void drawBody(int fontId, int x, int startY, int currentPage) const;

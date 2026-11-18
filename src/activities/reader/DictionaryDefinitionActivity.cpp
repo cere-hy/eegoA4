@@ -222,6 +222,21 @@ bool DictionaryDefinitionActivity::reserveLines(Definition& next, const size_t c
   return true;
 }
 
+int DictionaryDefinitionActivity::definitionFontId() const {
+  // Interaction/legibility batch: full-screen definition text is one step
+  // larger than the reader body (16pt), decoupled from SETTINGS.fontPointSize
+  // so the body (and its per-page line count / pagination) is untouched.
+  // ReaderFontSizes guarantees BUILTIN_READER_POINT_SIZES is non-empty.
+  constexpr uint8_t kDefinitionPt = 16;
+  const int base = SETTINGS.getReaderFontId();
+  const uint8_t bodyPt = SETTINGS.fontPointSize;
+  if (bodyPt == kDefinitionPt) return base;  // already at target — no variant needed
+  const float scale = static_cast<float>(kDefinitionPt) / static_cast<float>(bodyPt);
+  const int variant = renderer.resolveFontVariant(base, scale);
+  if (variant != 0 && renderer.ensureFontLoaded(variant)) return variant;
+  return base;  // no 16pt variant available — keep the reader font, never tofu
+}
+
 bool DictionaryDefinitionActivity::prepareFont(std::string& definition, const int fontId) {
   if (!renderer.isSdCardFont(fontId)) return true;
   const bool hasRtl =
@@ -257,7 +272,7 @@ bool DictionaryDefinitionActivity::wrapText(Definition& next) {
   lines.clear();
   if (!reserveLines(next, definition.size() / 32 + 8)) return false;
 
-  const int fontId = SETTINGS.getReaderFontId();
+  const int fontId = definitionFontId();
   if (!prepareFont(definition, fontId)) return false;
 
   const BodyArea body = bodyArea();
@@ -477,7 +492,8 @@ void DictionaryDefinitionActivity::navigateDefinition(const bool back) {
 
 bool DictionaryDefinitionActivity::buildPlainSelectionPages() {
   // Only the selection window gets packed word arenas; the definition keeps its cheap line spans.
-  const int fontId = SETTINGS.getReaderFontId();
+  // Hit-testing must re-measure at the SAME size the body was drawn at, else word rects drift.
+  const int fontId = definitionFontId();
   const int lineHeight = renderer.getLineHeight(fontId, PLAIN_TEXT_LINE_SPACING);
   const int pageCount = std::min<int>(SELECTION_PAGE_WINDOW, content.totalPages - content.selectionPage);
   const size_t scratchBytes =
@@ -715,26 +731,82 @@ void DictionaryDefinitionActivity::render(RenderLock&&) {
   if (totalPages > 1) {
     snprintf(counter, sizeof(counter), "%d/%d", currentPage + 1, totalPages);
   }
-  GUI.drawHeader(renderer, Rect{contentX, contentY + metrics.topPadding, contentWidth, metrics.headerHeight},
-                 content.headword.c_str(), counter[0] ? counter : nullptr);
+  const auto drawHeaderRow = [&]() {
+    GUI.drawHeader(renderer, Rect{contentX, contentY + metrics.topPadding, contentWidth, metrics.headerHeight},
+                   content.headword.c_str(), counter[0] ? counter : nullptr);
+  };
 
   // Body: two-pass draw inside a prewarm scope (same pattern as the reader's
   // renderContents) so SD-card font glyphs load from SD in one batch instead
   // of one on-demand overflow read per character on every page turn.
-  const int fontId = SETTINGS.getReaderFontId();
+  // definitionFontId() = reader font stepped up to 16pt (decoupled from body).
+  const int fontId = definitionFontId();
   const BodyArea body = bodyArea();
   auto* fcm = renderer.getFontCacheManager();
-  auto scope = fcm->createPrewarmScope();
-  drawBody(fontId, body.x, body.y, currentPage);  // scan pass: records codepoints only
-  scope.endScanAndPrewarm();
-  drawBody(fontId, body.x, body.y, currentPage);
+  {
+    auto scope = fcm->createPrewarmScope();
+    drawBody(fontId, body.x, body.y, currentPage);  // scan pass: records codepoints only
+    scope.endScanAndPrewarm();
+  }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), lookup ? tr(STR_LOOKUP) : "", (currentPage > 0 ? "<" : ""),
                                             (currentPage + 1 < totalPages ? ">" : ""));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  if (messageVisible) {
-    GUI.drawPopup(renderer, I18N.get(message));
+  const auto drawHints = [&]() { GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4); };
+
+  // Full-screen definition pages are static reading surfaces. Render them with
+  // the same Gray3 anti-aliasing path the EPUB reader body already uses on this
+  // panel: B/W base stashed undisplayed (Combined base), then LSB/MSB gray
+  // masks, committed as ONE waveform. Every frame — including page turns and
+  // the transient popup — goes through Gray3, so the transition stays
+  // continuous and never switches to a plain B/W frame midway. No new LUT or
+  // waveform is introduced (stock V1.0.3 Gray3 path already validated on A4).
+  const auto grayCaps = renderer.grayscaleCapabilities(HalDisplay::GrayscaleMode::Overlay);
+  const bool useGray3 = SETTINGS.textAntiAliasing && grayCaps.supported() &&
+                        grayCaps.base == HalDisplay::GrayscaleBase::Combined;
+
+  const auto paint = [&]() {
+    drawHeaderRow();
+    drawBody(fontId, body.x, body.y, currentPage);
+    drawHints();
+    if (messageVisible) GUI.drawPopup(renderer, I18N.get(message));
+  };
+
+  if (!useGray3) {
+    // Fallback for panels without a Combined Gray3 base: plain single B/W frame.
+    renderer.setRenderMode(GfxRenderer::BW);
+    paint();
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     return;
   }
-  renderer.displayBuffer();
+
+  // 1) B/W base into frameBuffer; stash it before the gray passes overwrite it.
+  renderer.setRenderMode(GfxRenderer::BW);
+  paint();
+  if (!renderer.storeBwBuffer()) {
+    // No room to preserve the base: flush it so the page still reaches the
+    // panel, then fall back next frame. Never leave a stale MSB plane showing.
+    renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+    renderer.cleanupGrayscaleWithFrameBuffer();
+    return;
+  }
+  // Combined panels keep the base undisplayed; the single Gray3 commit drives
+  // it out (a full clean refresh on entry, a differential transition on turns).
+  renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
+
+  // 2) LSB / MSB coverage planes of the same content.
+  renderer.clearScreen(0x00);
+  renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
+  paint();
+  renderer.copyGrayscaleLsbBuffers();
+
+  renderer.clearScreen(0x00);
+  renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
+  paint();
+  renderer.copyGrayscaleMsbBuffers();
+
+  // 3) One Gray3 waveform commits base + grays; restore frameBuffer to the
+  //    saved B/W base so a later plain draw never paints onto plane data.
+  renderer.displayGrayBuffer();
+  renderer.setRenderMode(GfxRenderer::BW);
+  renderer.restoreBwBuffer();
 }
