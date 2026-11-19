@@ -58,7 +58,9 @@ bool secondary(void* /*ctx*/, uint32_t cp, uint8_t style, TtfEpdFont& font) {
   if (g_reader) {
     uint8_t rec[kPif1Record];
     if (g_reader->get(cp, rec)) {
-      const int px = std::max(8, std::min(72, int(font.family().getSizeInPixels() + 0.5f)));
+      // S3c P1: getSizeInPixels() is an em ppem; PIF1 px is asc-desc height.
+      // pif1PxFromEmPx() converts em->asc-desc (x1.448) before the Pico formulas.
+      const int px = pif1PxFromEmPx(font.family().getSizeInPixels());
       const int w = scaledW(rec[2], px);
       const int h = scaledW(rec[3], px);
       if (w > 0 && h > 0 && w <= 72 && h <= 72) {
