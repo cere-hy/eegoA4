@@ -36,6 +36,14 @@
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
 
+// S3c P0 fix: render-task stack sizing, shared by begin() (xTaskCreate) and
+// renderTaskLoop() (stack high-water logging). See the rationale at begin().
+#if CROSSPOINT_VECTOR_FONTS
+constexpr uint32_t kRenderTaskStackBytes = 24576;
+#else
+constexpr uint32_t kRenderTaskStackBytes = 8192;
+#endif
+
 ActivityManager::ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : renderer(renderer), mappedInput(mappedInput), renderingMutex(xSemaphoreCreateMutex()) {
   assert(renderingMutex != nullptr && "Failed to create rendering mutex");
@@ -50,18 +58,8 @@ void ActivityManager::begin() {
 #else
   constexpr BaseType_t renderTaskCore = 0;
 #endif
-#if CROSSPOINT_VECTOR_FONTS
-  // FreeType rasterization runs on this task, and the deepest observed chain
-  // is a glyph fault DURING LAYOUT: expat + parser + line-layout frames
-  // (~3.5KB on Xtensa) with the scan converter's FT_RENDER_POOL_SIZE (4KB)
-  // stack-resident band pool on top — a measured ~8KB peak that trips the
-  // canary on an 8KB stack. Vector-font boards all have PSRAM-class RAM.
-  constexpr uint32_t renderTaskStackBytes = 16384;
-#else
-  constexpr uint32_t renderTaskStackBytes = 8192;
-#endif
   xTaskCreatePinnedToCore(&renderTaskTrampoline, "ActivityManagerRender",
-                          renderTaskStackBytes,  // Stack size
+                          kRenderTaskStackBytes,  // Stack size (see file-scope rationale)
                           this,                  // Parameters
                           1,                     // Priority
                           &renderTaskHandle,     // Task handle
@@ -89,6 +87,16 @@ void ActivityManager::renderTaskLoop() {
       const uint32_t renderingVisit = screenVisit;
       currentActivity->render(std::move(lock));
       paintedVisit.store(renderingVisit, std::memory_order_release);
+      // S3c P0: expose this task's post-render stack high-water mark so real
+      // hardware can confirm the tinfl/secondary fix left healthy headroom.
+      // uxTaskGetStackHighWaterMark returns the MINIMUM free stack (in words)
+      // observed since creation; low values mean a deep render just ran.
+      if (renderTaskHandle) {
+        const UBaseType_t hwmWords = uxTaskGetStackHighWaterMark(renderTaskHandle);
+        LOG_INF("ACT", "render stack HWM: %u words free (%u bytes) of %u",
+                (unsigned)hwmWords, (unsigned)(hwmWords * sizeof(StackType_t)),
+                (unsigned)kRenderTaskStackBytes);
+      }
     }
     // Notify any task blocked in requestUpdateAndWait() that the render is done.
     TaskHandle_t waiter = nullptr;

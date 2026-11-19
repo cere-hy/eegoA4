@@ -30,11 +30,21 @@ std::atomic<bool> g_unavailable{false};
 uint32_t g_cjkSeen = 0;
 uint32_t g_cjkMissing = 0;
 
-// tinfl adapter for Pif1Reader (zlib-wrapped block → out). Uses the one-shot
-// mem-to-mem helper so no decompressor struct stack frame sits in the UI task.
+// P0 stack-overflow fix (S3c): tinfl_decompressor is ~8.3KB. The vendored
+// crosspoint_tinfl_decompress_mem_to_mem() declares it as a LOCAL (miniz.c:2971),
+// which put an 8.3KB frame on the ActivityManager render task and tripped the
+// canary during section-build glyph faults (backtrace ...mem_to_mem -> tinfl).
+// Use ONE file-static decompressor instead: PUSH glyph faults only ever run on
+// the single render task, so reuse is safe and the state moves off the stack.
+static tinfl_decompressor g_inflateState;
+
 size_t inflateBlock(const uint8_t* src, size_t srcLen, uint8_t* dst, size_t dstCap) {
-  return crosspoint_tinfl_decompress_mem_to_mem(dst, dstCap, src, srcLen,
-                                                TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+  tinfl_init(&g_inflateState);
+  size_t outLen = dstCap;
+  const tinfl_status status = tinfl_decompress(
+      &g_inflateState, src, &srcLen, dst, dst, &outLen,
+      TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+  return status == TINFL_STATUS_DONE ? outLen : 0;
 }
 
 // 25/50/75% coverage → 2-bit, identical to TtfEpdFont::faultGlyph quantizer.
@@ -52,12 +62,16 @@ bool secondary(void* /*ctx*/, uint32_t cp, uint8_t style, TtfEpdFont& font) {
       const int w = scaledW(rec[2], px);
       const int h = scaledW(rec[3], px);
       if (w > 0 && h > 0 && w <= 72 && h <= 72) {
-        // Build a temporary 8-bit coverage buffer, then pack to the font's bit depth.
-        uint8_t cover[72 * 72];
+        // P0 stack-overflow fix (S3c): cover[]/packed[] were stack locals
+        // (5184B + 1308B) on the same render-task frame, together with the
+        // 8.3KB tinfl state they blew the 16KB canary. Make them file-static
+        // scratch buffers: PUSH glyph faults are single-task and each call
+        // fully overwrites the region it reads back, so reuse is safe.
+        static uint8_t cover[72 * 72];
         for (int y = 0; y < h; ++y)
           for (int x = 0; x < w; ++x) cover[y * w + x] = coverage(rec, w, h, x, y);
         const bool twoBit = true;  // PUSH font is always loaded twoBit
-        uint8_t packed[72 * 72 / 4 + 4];
+        static uint8_t packed[72 * 72 / 4 + 4];
         size_t n = 0;
         if (twoBit) {
           std::memset(packed, 0, sizeof(packed));
