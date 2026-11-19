@@ -370,6 +370,13 @@ class GfxRenderer {
   int getTextAdvanceX(int fontId, const char* text, EpdFontFamily::Style style, int8_t tracking = 0,
                       BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO,
                       TextMeasureMode mode = TextMeasureMode::Layout) const;
+  // S3c-final P0#3: runtime kill-switch for the advance-only layout fast path.
+  // Default ON. Turning it OFF makes getTextAdvanceX fall back to the original
+  // getGlyphMetrics() path (pre-advance-only behaviour) WITHOUT rebuilding,
+  // so a single binary can A/B the fast path on real hardware. No APK/protocol
+  // change; call from a debug entry point or startup settings hook.
+  static void setAdvanceOnlyEnabled(bool enabled);
+  static bool advanceOnlyEnabled();
   int getFontAscenderSize(int fontId) const;
   int getLineHeight(int fontId) const;
   // Explicit line spacing scales font size; the one-argument form returns font metrics.

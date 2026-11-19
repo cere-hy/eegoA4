@@ -530,6 +530,11 @@ void setupDisplayAndFonts(bool seamless = false) {
 
   display.begin(seamless);
   renderer.begin();
+  // S3c-final P0#3: apply the advance-only fast-path kill switch from settings.
+  // Default true; set "advanceOnlyLayout":false in settings.json to A/B the
+  // original measurement path without rebuilding or touching APK/protocol.
+  GfxRenderer::setAdvanceOnlyEnabled(SETTINGS.advanceOnlyLayout);
+  LOG_INF("MAIN", "advanceOnlyLayout=%d", SETTINGS.advanceOnlyLayout ? 1 : 0);
   activityManager.begin();
   LOG_DBG("MAIN", "Display initialized");
 

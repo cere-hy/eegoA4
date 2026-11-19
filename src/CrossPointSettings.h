@@ -326,6 +326,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // are selectable; SdCardFontSystem::ensureLoaded() snaps this to the nearest
   // available size (and persists the snap) whenever the family changes.
   uint8_t fontPointSize = DEFAULT_FONT_POINT_SIZE;
+  // S3c-final P0#3: advance-only layout fast-path kill switch. Not exposed in
+  // the Settings UI; edit settings.json ("advanceOnlyLayout":false) to fall
+  // back to the original getGlyphMetrics() measurement for A/B verification.
+  bool advanceOnlyLayout = true;
   uint8_t lineSpacing = LINE_SPACING_120;
   uint8_t paragraphAlignment = JUSTIFIED;
   // Auto-sleep timeout setting (default 10 minutes). Legacy sleepTimeout enum values are migration-only.

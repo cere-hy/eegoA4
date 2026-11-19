@@ -97,6 +97,9 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   // option lists depend on the SD font registry), so the generic loop skips them.
   doc["fontFamily"] = STORED_NOTOSANS;
   doc["fontSize"] = fontPointSize;
+  // S3c-final P0#3 diagnostics switch (hidden from UI). Persist even when true
+  // so an explicit false can be cleared again by writing true in settings.json.
+  doc["advanceOnlyLayout"] = advanceOnlyLayout;
   // SD card font family name — not in SettingsList, save manually
   if (sdFontFamilyName[0] != '\0') {
     doc["sdFontFamilyName"] = sdFontFamilyName;
@@ -258,6 +261,9 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
     needsResave = true;
   }
   fontPointSize = storedFontSize;
+
+  // S3c-final P0#3 diagnostics switch: absent key keeps the default (true).
+  if (!doc["advanceOnlyLayout"].isNull()) advanceOnlyLayout = doc["advanceOnlyLayout"] | true;
 
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
   const uint8_t storedFontFamily = doc["fontFamily"] | STORED_NOTOSANS;

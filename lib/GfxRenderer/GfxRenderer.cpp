@@ -12,10 +12,21 @@
 #include <Utf8.h>
 
 #include <algorithm>
+#include <atomic>
 
 #include "../Memory/Memory.h"
 #include "FontCacheManager.h"
 #include "GlyphBitmap.h"
+
+// S3c-final P0#3: process-wide kill-switch for the advance-only layout path.
+// Defined at file scope (not a class member) so the header needs no <atomic>
+// and host builds stay trivial. Default ON.
+namespace {
+std::atomic<bool> g_advanceOnlyEnabled{true};
+}  // namespace
+
+void GfxRenderer::setAdvanceOnlyEnabled(bool enabled) { g_advanceOnlyEnabled.store(enabled); }
+bool GfxRenderer::advanceOnlyEnabled() { return g_advanceOnlyEnabled.load(); }
 
 namespace {
 // Synthesized small caps: lowercase letters draw as capitals at roughly x-height.
@@ -2204,7 +2215,10 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   // measuring never creates a bitmap and never causes a duplicate rasterize.
   {
     const auto ttfIt = ttfFonts_.find(resolvedFontId);
-    if (mode == TextMeasureMode::Layout && ttfIt != ttfFonts_.end() && ttfIt->second != nullptr) {
+    // P0#3 kill-switch: when disabled, skip the fast path entirely so this
+    // call falls through to the original getGlyphMetrics() path below.
+    if (advanceOnlyEnabled() && mode == TextMeasureMode::Layout &&
+        ttfIt != ttfFonts_.end() && ttfIt->second != nullptr) {
       const auto fontIt = fontMap.find(resolvedFontId);
       if (fontIt == fontMap.end()) {
         LOG_ERR("GFX", "Font %d not found", resolvedFontId);

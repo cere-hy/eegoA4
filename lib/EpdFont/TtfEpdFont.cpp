@@ -1,4 +1,5 @@
 #include "TtfEpdFont.h"
+#include "AdvanceTable.h"
 
 #if CROSSPOINT_VECTOR_FONTS
 
@@ -10,7 +11,25 @@
 #include <algorithm>
 #include <cstring>
 
+#if defined(ESP_PLATFORM)
+#include <esp_memory_utils.h>
+#endif
+
 namespace {
+
+// S3c-final P0#3 guard: an advance-table buffer must live in WRITABLE RAM.
+// Flash DROM is cache-mapped into the same 0x3Cxx.... window as PSRAM, so a
+// raw address-range test cannot tell them apart — use the ESP memory utils.
+// Returns true for nullptr/empty (nothing to validate yet) and on host builds.
+inline bool writableRam(const void* p) {
+  if (p == nullptr) return true;
+#if defined(ESP_PLATFORM)
+  return esp_ptr_internal(p) || esp_ptr_external_ram(p);
+#else
+  (void)p;
+  return true;
+#endif
+}
 
 // Cache growth policy: PsramAlloc ABORTS when fiFontMalloc fails, and vector
 // doubling transiently needs old+new blocks, so every cache expansion must be
@@ -710,13 +729,22 @@ bool TtfEpdFont::getAdvance(const uint32_t cp, const uint8_t style, uint16_t& ad
   }
   if (!have) return false;
 
-  // Insert ordered; advanceX is uint16_t 12.4 (clamp negatives to 0, as faultGlyph).
-  const uint16_t store = static_cast<uint16_t>(adv < 0 ? 0 : adv);
-  const auto pos = std::lower_bound(f.advances.begin(), f.advances.end(), cp,
-                                    [](const Face::AdvanceEntry& e, uint32_t c) { return e.cp < c; });
+  // S3c-final P0#3 ROOT-CAUSE FIX:
+  // The previous code computed `pos = lower_bound(...)` BEFORE reserveChecked().
+  // reserveChecked() may call vector::reserve(), which REALLOCATES and frees the
+  // old buffer; the already-computed `pos` then dangles into freed/remapped
+  // memory. vector::insert(pos, ...) invoked __copy_move_backward on that stale
+  // iterator, writing to 0x3c5afffc — a Flash-DROM (read-only cache) address —
+  // causing "Dbus write to cache rejected" on both large and small documents.
+  // Fix: grow FIRST (shared AdvanceTable.h, same code the host test runs), then
+  // validate the buffer is writable, then insert from the STABLE buffer.
   static constexpr size_t kAdvanceStep = 64;
-  if (!reserveChecked(f.advances, f.advances.size() + 1, kAdvanceStep, cap)) return false;
-  f.advances.insert(pos, Face::AdvanceEntry{cp, store});
+  if (!epd::advanceTableReserve(f.advances, f.advances.size() + 1, kAdvanceStep, cap, canGrow)) return false;
+  // Defence in depth: never write if the (possibly reallocated) buffer is not
+  // in writable RAM. Falling back to the ordinary slow path is always safe.
+  if (!writableRam(f.advances.data())) return false;
+  const uint16_t store = static_cast<uint16_t>(adv < 0 ? 0 : adv);
+  if (!epd::advanceTableInsert(f.advances, Face::AdvanceEntry{cp, store}, kAdvanceStep, cap, canGrow)) return false;
   adv12_4 = store;
   return true;
 }
