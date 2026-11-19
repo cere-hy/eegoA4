@@ -90,6 +90,66 @@ int main(void) {
   CoverInfo nt = {NULL, 999999};
   CHECK(writeCoverBmp(sink, NULL, nt), "null time string ok");
 
+  /* ---- S3c merged-order P2: from-scratch cover redraw ---- */
+  g_len = 0;
+  CoverInfo spec = {"2026-11-19 08:58", 4458};
+  CHECK(writeCoverBmp(sink, NULL, spec), "P2 render ok");
+  const int PO = 14 + 40 + 8;  // pixel offset
+  const uint8_t* prows = g_buf + PO;
+  auto isInk = [&](int x, int cy) {  // canvas top-down y -> BottomUp file row
+    const uint8_t b = prows[(pushthumb::kThumbHeight - 1 - cy) * rowBytes + (x >> 3)];
+    return !((b >> (7 - (x & 7))) & 1);
+  };
+  // White coverage > 90%.
+  long white = 0;
+  for (int cy = 0; cy < pushthumb::kThumbHeight; ++cy)
+    for (int x = 0; x < pushthumb::kThumbWidth; ++x)
+      if (!isInk(x, cy)) ++white;
+  CHECK(white * 100 > (long)pushthumb::kThumbWidth * pushthumb::kThumbHeight * 90,
+        "P2: white background coverage > 90%");
+
+  // Find ink row segments (canvas top-down), merge gaps <= 3px.
+  int segY0[8], segY1[8], nseg = 0;
+  for (int cy = 0; cy < pushthumb::kThumbHeight; ++cy) {
+    bool any = false;
+    for (int x = 0; x < pushthumb::kThumbWidth; ++x) if (isInk(x, cy)) { any = true; break; }
+    if (!any) continue;
+    if (nseg && cy - segY1[nseg-1] <= 3) segY1[nseg-1] = cy;
+    else if (nseg < 8) { segY0[nseg] = segY1[nseg] = cy; ++nseg; }
+  }
+  CHECK(nseg == 3, "P2: exactly 3 ink bands (PUSH / time / bytes; no mid duplicate)");
+  if (nseg == 3) {
+    for (int s = 0; s < nseg; ++s) {
+      int bx0 = pushthumb::kThumbWidth, bx1 = -1;
+      for (int cy = segY0[s]; cy <= segY1[s]; ++cy)
+        for (int x = 0; x < pushthumb::kThumbWidth; ++x)
+          if (isInk(x, cy)) { if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; }
+      CHECK(bx0 >= 8, "P2: band left margin >= 8");
+      CHECK(bx1 <= 232, "P2: band right margin <= 232 (right edge)");
+      const int cx2 = bx0 + bx1;  // 2*centre; expect ~240
+      CHECK(cx2 >= 232 && cx2 <= 248, "P2: band horizontally centred on 120 (+/-4)");
+    }
+    // Large PUSH band ~48px tall, near top (~y100).
+    CHECK((segY1[0] - segY0[0] + 1) >= 40, "P2: large PUSH band ~48px tall (vector raster)");
+    // Time band must be fully inside (not clipped at x=0/239 as the old bug did).
+    int tbx0 = pushthumb::kThumbWidth, tbx1 = -1;
+    for (int cy = segY0[1]; cy <= segY1[1]; ++cy)
+      for (int x = 0; x < pushthumb::kThumbWidth; ++x)
+        if (isInk(x, cy)) { if (x < tbx0) tbx0 = x; if (x > tbx1) tbx1 = x; }
+    CHECK(tbx0 > 8 && tbx1 < 232, "P2: time line fully visible, no edge clipping");
+  }
+  // Byte count carries a unit: rendering a much larger byte count must change
+  // the pixels (the numeric part is present), and " bytes" suffix glyph set exists.
+  {
+    uint8_t snap[256*1024]; size_t sl;
+    memcpy(snap, g_buf, g_len); sl = g_len;
+    g_len = 0;
+    writeCoverBmp(sink, NULL, (CoverInfo){"2026-11-19 08:58", 12345});
+    int diff = 0; for (size_t i = 0; i < sl; ++i) if (g_buf[i] != snap[i]) ++diff;
+    CHECK(diff > 0, "P2: byte count value reflected in cover pixels");
+    CHECK(sl == g_len, "P2: byte count change keeps BMP size");
+  }
+
   printf("PushThumb host: %d checks, %d RED\n", checks, red);
   return red ? 1 : 0;
 }

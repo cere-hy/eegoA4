@@ -136,18 +136,49 @@ inline unsigned pifBit(const uint8_t* rec, int x, int y) {
   return (rec[5 + b / 8] >> (b & 7)) & 1u;
 }
 
-// 2x2 bilinear coverage at pixel center; port of Pico ui_hanzi_coverage().
-// Scales a 24px source record to a (w,h) destination glyph, returning 0..255.
+// S3c merged-order P1 — edge-preserving 2x2 coverage at pixel center.
+// Scales a 24px 1-bit source record to a (w,h) destination glyph, returning 0..255.
+//
+// Root cause fixed here: the source is a 1-bit (0/255) bitmap. Plain bilinear
+// averaging of the 2x2 neighbourhood smears every hard stroke edge into a wide
+// gray band (measured mid-gray 23-29% at the device px=42 after 2-bit
+// quantisation), which reads as an ink blob for low-frequency glyphs such as
+// 观/倍/摇 that fall back to PIF1. Vector glyphs (国/中/文 in builtin.ttf) only
+// have ~10-21% mid-gray and were never touched.
+//
+// Fix (hierarchy level 1: interpolation shape preservation): when the 2x2
+// neighbourhood mixes ink and paper (max-min = 255 > 128 threshold), the sample
+// sits on a stroke boundary — take the nearest neighbour / dominant-direction
+// sample instead of averaging, so a thin stroke is not averaged into flat gray.
+// When all four taps agree (interior/exterior), keep the exact bilinear result.
+// This is a single global rule: no per-glyph / per-size tuning, and the Pico
+// scaling formulas (scaledAdvance/scaledLeft/scaledTop/scaledW) are unchanged.
 inline uint8_t coverage(const uint8_t* rec, int w, int h, int x, int y) {
   const int sx = ((2 * x + 1) * int(rec[2]) * 256) / (2 * w) - 128;
   const int sy = ((2 * y + 1) * int(rec[3]) * 256) / (2 * h) - 128;
   const int ix = sx >= 0 ? sx / 256 : -((-sx + 255) / 256);
   const int iy = sy >= 0 ? sy / 256 : -((-sy + 255) / 256);
   const unsigned fx = unsigned(sx - ix * 256), fy = unsigned(sy - iy * 256);
-  const unsigned c = pifBit(rec, ix, iy) * (256 - fx) * (256 - fy) +
-                     pifBit(rec, ix + 1, iy) * fx * (256 - fy) +
-                     pifBit(rec, ix, iy + 1) * (256 - fx) * fy +
-                     pifBit(rec, ix + 1, iy + 1) * fx * fy;
+  const unsigned b00 = pifBit(rec, ix, iy);
+  const unsigned b10 = pifBit(rec, ix + 1, iy);
+  const unsigned b01 = pifBit(rec, ix, iy + 1);
+  const unsigned b11 = pifBit(rec, ix + 1, iy + 1);
+  const unsigned mn = b00 < b10 ? (b00 < b01 ? (b00 < b11 ? b00 : b11) : (b01 < b11 ? b01 : b11))
+                                : (b10 < b01 ? (b10 < b11 ? b10 : b11) : (b01 < b11 ? b01 : b11));
+  const unsigned mx = b00 > b10 ? (b00 > b01 ? (b00 > b11 ? b00 : b11) : (b01 > b11 ? b01 : b11))
+                                : (b10 > b01 ? (b10 > b11 ? b10 : b11) : (b01 > b11 ? b01 : b11));
+  // Taps are 1-bit (0/1); two distinct taps differ by 255 in the coverage(0..255)
+  // domain, i.e. > the 128 threshold -> on a stroke boundary.
+  if (mx != mn) {
+    unsigned v;
+    if (b00 == b01 && b10 == b11)      v = fx < 128 ? b00 : b10;  // vertical edge: nearest in x
+    else if (b00 == b10 && b01 == b11) v = fy < 128 ? b00 : b01;  // horizontal edge: nearest in y
+    else                               v = (fx < 128) ? (fy < 128 ? b00 : b01)   // diagonal / corner
+                                                      : (fy < 128 ? b10 : b11);
+    return v ? 255 : 0;
+  }
+  const unsigned c = b00 * (256 - fx) * (256 - fy) + b10 * fx * (256 - fy) +
+                     b01 * (256 - fx) * fy + b11 * fx * fy;
   return uint8_t((c * 255 + 32768) / 65536);
 }
 

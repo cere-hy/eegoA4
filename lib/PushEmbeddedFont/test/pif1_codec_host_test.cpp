@@ -80,6 +80,34 @@ int main(int argc, char** argv) {
   CHECK(scaledLeft(-13, 14) == -8, "floor negative x0 @14px (-7.58 -> -8)");
   CHECK(scaledW(24, 14) == 14, "ceil width @14px");
 
+  // S3c merged-order P1 — edge-preserving coverage.
+  // (a) Edge protection must NOT change the exact 24px source reproduction:
+  //     at 1:1 the sample sits on a pixel centre, so mx-mn never crosses the
+  //     boundary threshold and the bilinear path yields the source bit.
+  {
+    int bad = 0;
+    for (int y = 0; y < h24; ++y)
+      for (int x = 0; x < w24; ++x) {
+        uint8_t cov = coverage(rec24, w24, h24, x, y);
+        if ((cov >= 128) != bool(pifBit(rec24, x, y))) ++bad;
+      }
+    CHECK(bad == 0, "edge coverage still reproduces source bitmap at 24px");
+  }
+  // (b) At device px=42, edge coverage returns only 0 or 255 (no gray smear):
+  //     every sample is either interior (all taps agree -> exact bilinear,
+  //     which for a 1-bit source is 0/255) or a boundary (nearest -> 0/255).
+  //     A plain bilinear interpolator would produce many 1..254 mid values.
+  {
+    const int px = 42;
+    int w = scaledW(rec24[2], px), h = scaledW(rec24[3], px), mid = 0;
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+        uint8_t cov = coverage(rec24, w, h, x, y);
+        if (cov != 0 && cov != 255) ++mid;
+      }
+    CHECK(mid == 0, "edge coverage at px=42 has zero mid-gray (no ink-blob smear)");
+  }
+
   printf("Pif1Codec host: %d checks, %d RED\n", checks, red);
   return red ? 1 : 0;
 }
