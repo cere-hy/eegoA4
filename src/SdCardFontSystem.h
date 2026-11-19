@@ -42,6 +42,14 @@ class SdCardFontSystem {
   /// Returns 0 if not found. Used by CrossPointSettings::getReaderFontId().
   int resolveFontId(const char* familyName, uint8_t pointSize) const;
 
+  /// S3c: ensure the PUSH embedded font (resident builtin.ttf + PIF1 Han bitmap
+  /// + SD fallback) is loaded at the current reader point size. Safe to call
+  /// repeatedly; rebuilds only when the size changes. Returns its renderer font
+  /// id (non-zero on success), or 0 on load failure. Only PUSH uses this font.
+  int ensurePushFont(GfxRenderer& renderer);
+  /// Renderer font id of the loaded PUSH font (0 = not loaded yet).
+  int pushFontId() const { return pushFontId_; }
+
   /// Access the registry (e.g. for settings UI to enumerate available fonts).
   const SdCardFontRegistry& registry() const { return registry_; }
 
@@ -140,6 +148,12 @@ class SdCardFontSystem {
   // UI-size TTF fallbacks (share ttfSources_); parallel to their renderer font ids.
   std::vector<std::unique_ptr<TtfEpdFont>> ttfUi_;
   std::vector<int> ttfUiIds_;
+
+  // S3c PUSH embedded font: resident builtin.ttf (embed bytes, no SD), with
+  // PIF1 Han bitmap + SD fallback installed as its secondary glyph source.
+  std::unique_ptr<TtfEpdFont> pushTtf_;
+  int pushFontId_ = 0;
+  uint8_t pushPt_ = 0;
 
   // Reader-font faces at other sizes (share ttfSources_).
   struct TtfVariant {

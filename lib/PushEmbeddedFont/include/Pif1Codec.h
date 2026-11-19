@@ -1,0 +1,152 @@
+#pragma once
+// S3c — PIF1 codec for the embedded Han-glyph bitmap supplement (ui-hanzi.bin).
+//
+// PIF1 is the private block-compressed 24x24 1-bit format from the Pico sibling
+// (see pico-plus/main/font/ui_hanzi.{h,c}):
+//   header  : 'PIF1' u32 count u32 base_px u32 block_size
+//   chars   : count * u16 LE codepoints, sorted ascending
+//   offsets : (nblocks+1) * u32 LE, byte offset of each compressed block
+//   blocks  : zlib streams, each `block_size` records of RECORD bytes
+//   record  : [x0:i8][y0:i8][w:u8][h:u8][advance:u8][24*24/8=72 bytes bitmap]
+//
+// This module is PURE LOGIC: no allocator, no filesystem, no inflate library.
+// The caller injects memory (block buffer) and an inflate callback, so the same
+// code runs on-device (tinfl + PSRAM) and in host tests (zlib + malloc).
+#include <cstddef>
+#include <cstdint>
+
+namespace pushembedfont {
+
+constexpr uint32_t kPif1Magic = 0x31464950;  // 'PIF1' little-endian
+constexpr uint32_t kPif1BasePx = 24;
+constexpr uint32_t kPif1Block = 32;
+constexpr size_t kPif1Record = 77;
+constexpr size_t kPif1Header = 16;
+
+inline uint32_t rd32(const uint8_t* p) {
+  return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+inline uint16_t rd16(const uint8_t* p) { return uint16_t(p[0]) | (uint16_t(p[1]) << 8); }
+inline int8_t s8(const uint8_t b) { return b > 127 ? int8_t(int(b) - 256) : int8_t(b); }
+
+struct Pif1View {
+  const uint8_t* data = nullptr;
+  size_t size = 0;
+
+  bool valid() const {
+    if (!data || size < kPif1Header || rd32(data) != kPif1Magic) return false;
+    const uint32_t count = rd32(data + 4);
+    if (count == 0 || count > 6763 || rd32(data + 8) != kPif1BasePx || rd32(data + 12) != kPif1Block) return false;
+    const uint32_t nblocks = (count + kPif1Block - 1) / kPif1Block;
+    return kPif1Header + size_t(count) * 2 + size_t(nblocks + 1) * 4 <= size;
+  }
+  uint32_t count() const { return rd32(data + 4); }
+  const uint8_t* chars() const { return data + kPif1Header; }
+  const uint8_t* offsets() const { return data + kPif1Header + size_t(count()) * 2; }
+  const uint8_t* blocks() const { return offsets() + size_t((count() + kPif1Block - 1) / kPif1Block + 1) * 4; }
+
+  // Binary search. Returns record index or -1.
+  int indexOf(uint32_t cp) const {
+    if (!valid() || cp > 0xFFFF) return -1;
+    const uint32_t n = count();
+    const uint8_t* cs = chars();
+    uint32_t lo = 0, hi = n;
+    while (lo < hi) {
+      const uint32_t mid = lo + (hi - lo) / 2;
+      const uint32_t cand = rd16(cs + mid * 2);
+      if (cand < cp) lo = mid + 1;
+      else hi = mid;
+    }
+    return (lo < n && rd16(cs + lo * 2) == cp) ? int(lo) : -1;
+  }
+  bool has(uint32_t cp) const { return indexOf(cp) >= 0; }
+
+  // Return the on-disk compressed slice for the block containing `index`.
+  // inflate() must write at most outCap bytes and return the decoded byte count,
+  // or 0 on failure. Caller supplies `out` (kPif1Block * kPif1Record bytes) and
+  // retains it across calls for caching (handled by Pif1Reader).
+  bool decodeBlock(uint32_t block, uint8_t* out, size_t outCap,
+                   size_t (*inflate)(const uint8_t* src, size_t srcLen, uint8_t* dst, size_t dstCap)) const {
+    if (!valid()) return false;
+    const uint32_t n = count();
+    const uint32_t nblocks = (n + kPif1Block - 1) / kPif1Block;
+    if (block >= nblocks) return false;
+    const uint8_t* ofs = offsets();
+    const size_t start = rd32(ofs + block * 4);
+    const size_t end = rd32(ofs + (block + 1) * 4);
+    const size_t dataBytes = size - size_t(blocks() - data);
+    if (end < start || end > dataBytes) return false;
+    const size_t entries = (n - block * kPif1Block) < kPif1Block ? (n - block * kPif1Block) : kPif1Block;
+    if (inflate(blocks() + start, end - start, out, outCap) != entries * kPif1Record) return false;
+    return true;
+  }
+};
+
+// Single-block cached reader. `blockBuf` must hold kPif1Block*kPif1Record bytes
+// and outlive the reader; `inflate` as above. Not thread-safe (PUSH reader is
+// single-task). Returns false if cp absent or decompression failed.
+class Pif1Reader {
+ public:
+  Pif1Reader(Pif1View view, uint8_t* blockBuf,
+             size_t (*inflate)(const uint8_t*, size_t, uint8_t*, size_t))
+      : view_(view), buf_(blockBuf), inflate_(inflate) {}
+
+  bool get(uint32_t cp, uint8_t record[kPif1Record]) {
+    const int idx = view_.indexOf(cp);
+    if (idx < 0 || !buf_ || !inflate_) return false;
+    const uint32_t block = uint32_t(idx) / kPif1Block;
+    if (cached_ != block) {
+      if (!view_.decodeBlock(block, buf_, kPif1Block * kPif1Record, inflate_)) {
+        cached_ = kNoCache;
+        return false;
+      }
+      cached_ = block;
+    }
+    const size_t off = size_t(uint32_t(idx) % kPif1Block) * kPif1Record;
+    for (size_t i = 0; i < kPif1Record; ++i) record[i] = buf_[off + i];
+    return record[2] > 0 && record[2] <= kPif1BasePx && record[3] > 0 && record[3] <= kPif1BasePx && record[4] > 0;
+  }
+
+  void reset() { cached_ = kNoCache; }
+
+ private:
+  static constexpr uint32_t kNoCache = 0xFFFFFFFFu;
+  Pif1View view_;
+  uint8_t* buf_;
+  size_t (*inflate_)(const uint8_t*, size_t, uint8_t*, size_t);
+  uint32_t cached_ = kNoCache;
+};
+
+// 1-bit sample from a 24x24 record (MSB-first row-major).
+inline unsigned pifBit(const uint8_t* rec, int x, int y) {
+  if (x < 0 || y < 0 || x >= rec[2] || y >= rec[3]) return 0;
+  const unsigned b = unsigned(y) * kPif1BasePx + unsigned(x);
+  return (rec[5 + b / 8] >> (b & 7)) & 1u;
+}
+
+// 2x2 bilinear coverage at pixel center; port of Pico ui_hanzi_coverage().
+// Scales a 24px source record to a (w,h) destination glyph, returning 0..255.
+inline uint8_t coverage(const uint8_t* rec, int w, int h, int x, int y) {
+  const int sx = ((2 * x + 1) * int(rec[2]) * 256) / (2 * w) - 128;
+  const int sy = ((2 * y + 1) * int(rec[3]) * 256) / (2 * h) - 128;
+  const int ix = sx >= 0 ? sx / 256 : -((-sx + 255) / 256);
+  const int iy = sy >= 0 ? sy / 256 : -((-sy + 255) / 256);
+  const unsigned fx = unsigned(sx - ix * 256), fy = unsigned(sy - iy * 256);
+  const unsigned c = pifBit(rec, ix, iy) * (256 - fx) * (256 - fy) +
+                     pifBit(rec, ix + 1, iy) * fx * (256 - fy) +
+                     pifBit(rec, ix, iy + 1) * (256 - fx) * fy +
+                     pifBit(rec, ix + 1, iy + 1) * fx * fy;
+  return uint8_t((c * 255 + 32768) / 65536);
+}
+
+// Pico formulas, exact integer equivalents (no float on device):
+//   fallback_advance = round(advance24 * px / 24)
+//   x0/y0 = floor(v * px / 24)  -- Pico uses floorf(), so negative offsets must
+//                                 floor, not truncate toward zero.
+inline int floorDiv(int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
+inline int scaledAdvance(uint8_t advance24, int px) { return (int(advance24) * px + kPif1BasePx / 2) / int(kPif1BasePx); }
+inline int scaledLeft(int8_t x0, int px) { return floorDiv(int(x0) * px, int(kPif1BasePx)); }
+inline int scaledTop(int8_t y0, int px) { return floorDiv(int(y0) * px, int(kPif1BasePx)); }
+inline int scaledW(uint8_t w24, int px) { return (int(w24) * px + int(kPif1BasePx) - 1) / int(kPif1BasePx); }
+
+}  // namespace pushembedfont

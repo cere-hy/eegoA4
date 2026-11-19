@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <PushEmbeddedFont.h>
 #include <TtfEpdFont.h>
 #include <esp_heap_caps.h>
 
@@ -71,6 +72,51 @@ constexpr UiFontSize kUiFontSizes[] = {
 
 }  // namespace
 
+int SdCardFontSystem::ensurePushFont(GfxRenderer& renderer) {
+#if CROSSPOINT_VECTOR_FONTS
+  pushembedfont::setSdFallback(ttf_.get());  // tier ③ uses the active SD vector font, if any
+  const uint8_t pt = SETTINGS.fontPointSize;
+  if (pushTtf_ && pushPt_ == pt && pushFontId_ != 0) return pushFontId_;
+
+  if (pushTtf_) {
+    renderer.unregisterTtfFont(pushFontId_);
+    renderer.removeFont(pushFontId_);
+    pushTtf_.reset();
+    pushFontId_ = 0;
+  }
+  auto f = makeUniqueNoThrow<TtfEpdFont>();
+  if (!f) {
+    LOG_ERR("SDFS", "OOM: TtfEpdFont for PUSH embedded font");
+    return 0;
+  }
+  // Resident builtin.ttf: embed bytes are borrowed and outlive this object.
+  f->addResidentSource(TtfEpdFont::Regular, pushembedfont::builtinTtfData(),
+                       static_cast<uint32_t>(pushembedfont::builtinTtfLen()));
+  const bool havePsram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) > 0;
+  const size_t cacheBytes = havePsram ? 512 * 1024 : 48 * 1024;
+  const uint16_t maxGlyphs = havePsram ? 2400 : 512;
+  if (!f->load(pt, /*twoBit=*/true, cacheBytes, maxGlyphs)) {
+    LOG_ERR("SDFS", "PUSH embedded font load failed @%upt", pt);
+    return 0;
+  }
+  f->build(" ");
+  pushembedfont::installInto(*f);  // install PIF1 + SD + placeholder secondary
+  const int id = computeTtfFontId("\x01push_embedded", pt);
+  renderer.insertFont(id, f->family());
+  renderer.registerTtfFont(id, f.get());
+  // Match theme: PUSH body uses the reader point size; UI-size variants of the
+  // embedded font are not needed (PUSH text is body only).
+  pushTtf_ = std::move(f);
+  pushFontId_ = id;
+  pushPt_ = pt;
+  LOG_INF("SDFS", "PUSH embedded font ready @%upt (id %d, cache %u KB)", pt, id, (unsigned)(cacheBytes / 1024));
+  return id;
+#else
+  (void)renderer;
+  return 0;  // no vector path: PUSH falls back to the reader's built-in font
+#endif
+}
+
 void SdCardFontSystem::begin(GfxRenderer& renderer) {
   registry_.discover();
   renderer_ = &renderer;
@@ -127,6 +173,11 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
       SETTINGS.clearSdFontFamily();
     }
   }
+
+  // S3c: prepare the PUSH embedded font once at startup so the home-screen
+  // PUSH button works immediately; rebuilt lazily on point-size change via
+  // ensurePushFont() from the reader/TextSettings paths.
+  ensurePushFont(renderer);
 
   LOG_DBG("SDFS", "SD font system ready (%d families discovered)", registry_.getFamilyCount());
 }
@@ -464,6 +515,7 @@ void SdCardFontSystem::unloadTtf(GfxRenderer& renderer) {
     renderer.removeFont(ttfFontId_);  // drop from the renderer's fontMap
   }
   ttf_.reset();  // frees the FT faces first (they read ttfSources_)
+  pushembedfont::setSdFallback(nullptr);  // S3c: clear PUSH tier-③ pointer before it dangles
   freeTtfSources();
   ttfFamily_.clear();
   ttfFontId_ = 0;

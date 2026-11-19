@@ -16,6 +16,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <PushEmbeddedFont.h>
 #include <TrustedTime.h>
 #include <WiFi.h>
 #include <esp_system.h>
@@ -278,6 +279,10 @@ bool EpubReaderActivity::loadBook() {
       Storage.removeDir((cdir + "/css").c_str());
       Storage.remove(kDirtyPath);
     }
+    // S3c: PUSH uses a dedicated embedded font (builtin.ttf resident + PIF1 Han
+    // bitmap + SD fallback), independent of the user's global reader font.
+    // Ensure it is loaded at the current point size BEFORE pagination below.
+    sdFontSystem.ensurePushFont(renderer);
   }
 
   const bool uncached = !Storage.exists((loadedEpub->getCachePath() + "/book.bin").c_str());
@@ -346,99 +351,27 @@ bool EpubReaderActivity::loadBook() {
   }
 
   loadLinkStack();
-  // S3b P1: fault the whole pushed document's glyph set before layout, so the
-  // vector font doesn't hit SD once per character during pagination.
-  prewarmPushGlyphs();
+  // S3c: glyph prewarm was removed — it faulted the whole document from the
+  // 25 MB SD TTF and measured 34-37 s (worse than S3's 13 s). PUSH now uses an
+  // embedded font family (builtin.ttf resident + PIF1 Han bitmap + SD fallback)
+  // whose glyphs are served from PSRAM; see PushEmbeddedFont.
   return true;
 }
 
-// S3b P1 — one-shot glyph prewarm for pushed plain text. The vector reader font
-// (LXGWWenKai 25 MB TTF on SD) faults glyphs one by one during layout, which made
-// a 5k-char document take ~13 s to paginate. We read the source text once, build
-// the unique-codepoint set, and fault all those glyphs into the PSRAM glyph cache
-// up front via the existing FontCacheManager::prewarmCache -> TtfEpdFont path.
-// Measured: 5000 CJK chars ~= 720 unique codepoints, well under the 4096-glyph
-// cache capacity, so no mid-pass flush. Non-PUSH books are untouched.
-void EpubReaderActivity::prewarmPushGlyphs() {
-  if (pushGlyphsPrewarmed_) return;
-  pushGlyphsPrewarmed_ = true;
-  if (bookPath != "/PUSH.txt") return;
-
-  auto* fcm = renderer.getFontCacheManager();
-  if (!fcm) return;
-
-  std::string raw;
-  // 512 KB protocol cap + slack; PUSH content is a few KB in practice.
-  if (!Storage.readFileToString("ERS", "/PUSH.txt", 512 * 1024 + 1, raw) || raw.empty()) return;
-
-  // Collect unique Unicode codepoints (valid UTF-8 only), preserving order of
-  // first appearance for deterministic caches.
-  std::set<uint32_t> cps;
-  for (size_t i = 0; i < raw.size();) {
-    const unsigned char b0 = static_cast<unsigned char>(raw[i]);
-    uint32_t cp = 0;
-    size_t n = 0;
-    if (b0 < 0x80) { cp = b0; n = 1; }
-    else if ((b0 & 0xE0) == 0xC0 && i + 1 < raw.size()) {
-      cp = ((b0 & 0x1F) << 6) | (static_cast<unsigned char>(raw[i+1]) & 0x3F); n = 2;
-    } else if ((b0 & 0xF0) == 0xE0 && i + 2 < raw.size()) {
-      cp = ((b0 & 0x0F) << 12) | ((static_cast<unsigned char>(raw[i+1]) & 0x3F) << 6) |
-           (static_cast<unsigned char>(raw[i+2]) & 0x3F); n = 3;
-    } else if ((b0 & 0xF8) == 0xF0 && i + 3 < raw.size()) {
-      cp = ((b0 & 0x07) << 18) | ((static_cast<unsigned char>(raw[i+1]) & 0x3F) << 12) |
-           ((static_cast<unsigned char>(raw[i+2]) & 0x3F) << 6) | (static_cast<unsigned char>(raw[i+3]) & 0x3F); n = 4;
-    } else { ++i; continue; }  // invalid lead byte: skip
-    if (cp != 0 && cp != 0xFFFD) cps.insert(cp);
-    i += n;
+int EpubReaderActivity::effectiveReaderFontId() const {
+  if (bookPath == "/PUSH.txt") {
+    const int id = sdFontSystem.pushFontId();
+    if (id != 0) return id;
   }
-  if (cps.empty()) return;
+  return SETTINGS.getReaderFontId();
+}
 
-  // Re-encode unique codepoints into one UTF-8 string for prewarmCache().
-  std::string uniq;
-  uniq.reserve(cps.size() * 3);
-  char buf[4];
-  for (uint32_t cp : cps) {
-    if (cp < 0x80) { buf[0] = static_cast<char>(cp); uniq.append(buf, 1); }
-    else if (cp < 0x800) {
-      buf[0] = static_cast<char>(0xC0 | (cp >> 6)); buf[1] = static_cast<char>(0x80 | (cp & 0x3F));
-      uniq.append(buf, 2);
-    } else if (cp < 0x10000) {
-      buf[0] = static_cast<char>(0xE0 | (cp >> 12)); buf[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-      buf[2] = static_cast<char>(0x80 | (cp & 0x3F)); uniq.append(buf, 3);
-    } else {
-      buf[0] = static_cast<char>(0xF0 | (cp >> 18)); buf[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-      buf[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); buf[3] = static_cast<char>(0x80 | (cp & 0x3F));
-      uniq.append(buf, 4);
-    }
-  }
-  uniq.push_back('\0');
-
-  const int fontId = SETTINGS.getReaderFontId();
-  // S3b P1 (missing-glyph guard): if a large share of CJK codepoints are not
-  // covered by the reader font, pages render as solid boxes and the user has no
-  // idea why. Detect it here and surface the existing ASCII "Damaged font file"
-  // popup rather than silently showing tofu. (An automatic body-font swap is not
-  // available: there is no per-codepoint family fallback in the renderer.)
-  {
-    const auto fit = renderer.getFontMap().find(fontId);
-    if (fit != renderer.getFontMap().end()) {
-      size_t cjk = 0, missing = 0;
-      for (uint32_t cp : cps) {
-        if (cp < 0x3400 || cp > 0x9FFF) continue;  // CJK Unified + Ext A
-        ++cjk;
-        if (!fit->second.hasCodepoint(cp, EpdFontFamily::REGULAR)) ++missing;
-      }
-      if (cjk >= 20 && missing * 5 > cjk) {  // >20% of CJK uncovered
-        pushFontMissingNotified_ = true;
-        LOG_ERR("ERS", "PUSH font coverage low: %u/%u CJK missing", (unsigned)missing, (unsigned)cjk);
-      }
-    }
-  }
-  const uint32_t t0 = millis();
-  // accumulate=true -> addCoverage(): faults glyphs without evicting nearer ones.
-  fcm->prewarmCache(fontId, uniq.c_str(), 0x0F, /*accumulate=*/true);
-  LOG_INF("ERS", "PUSH glyph prewarm: %u unique cps, %u bytes, %lums",
-          (unsigned)cps.size(), (unsigned)raw.size(), (unsigned long)(millis() - t0));
+ReaderRenderSpec EpubReaderActivity::readerRenderSpecForCurrentBook(const uint16_t w, const uint16_t h) const {
+  ReaderRenderSpec spec = SETTINGS.readerRenderSpec(w, h);
+  // Section-cache validation keys on fontId, so overriding it keeps PUSH pages
+  // (embedded font) distinct from other books (global font) in the cache.
+  spec.fontId = effectiveReaderFontId();
+  return spec;
 }
 
 ChapterPosition EpubReaderActivity::chapterPosition() const {
@@ -591,7 +524,7 @@ void EpubReaderActivity::idlePrewarmTick() {
   }
   auto* fcm = renderer.getFontCacheManager();
   if (!fcm) return;
-  const int maxLookahead = fcm->getIdleLookaheadPages(SETTINGS.getReaderFontId());
+  const int maxLookahead = fcm->getIdleLookaheadPages(effectiveReaderFontId());
   if (idlePrewarmOffset >= maxLookahead) return;
 
   // Single-page SD (.cpfont) reader fonts use a 400ms post-render debounce to protect
@@ -622,7 +555,7 @@ void EpubReaderActivity::idlePrewarmTick() {
   if (const auto p = section->loadPage(targetPage)) {
     const auto t0 = millis();
     auto scope = fcm->createPrewarmScope(true);
-    p->render(renderer, SETTINGS.getReaderFontId(), 0, 0);
+    p->render(renderer, effectiveReaderFontId(), 0, 0);
     if (!scope.endScanAndPrewarm()) {
       idlePrewarmOffset = maxLookahead;
       return;
@@ -1058,7 +991,7 @@ void EpubReaderActivity::loop() {
     if (lock.ownsLock() && section && !section->isBuilding() && section->isPartial() && buildViewportWidth > 0 &&
         !partialRebuildStartFailed && !bleturner::holdsHeap() &&
         section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount)) {
-      const ReaderRenderSpec buildSpec = SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight);
+      const ReaderRenderSpec buildSpec = readerRenderSpecForCurrentBook(buildViewportWidth, buildViewportHeight);
       if (!section->startBuild(buildSpec)) {
         partialRebuildStartFailed = true;
         LOG_ERR("ERS", "Failed to start deferred partial extension build");
@@ -1917,7 +1850,7 @@ void EpubReaderActivity::renderBook() {
   buildViewportWidth = viewportWidth;
   buildViewportHeight = viewportHeight;
 
-  const ReaderRenderSpec renderSpec = SETTINGS.readerRenderSpec(viewportWidth, viewportHeight);
+  const ReaderRenderSpec renderSpec = readerRenderSpecForCurrentBook(viewportWidth, viewportHeight);
 
   if (!section) {
     idlePrewarmOffset = 0;
@@ -2218,9 +2151,11 @@ void EpubReaderActivity::renderBook() {
     showFontDamagedMessage = true;
     fontDamagedMessageTime = millis();
   }
-  // S3b P1: pushed doc whose CJK glyph coverage is too low — same visible notice.
-  if (pushFontMissingNotified_) {
-    pushFontMissingNotified_ = false;
+  // S3c: the PUSH embedded font logs per-codepoint misses to the serial console
+  // (transparent to the user). Only when all four fallback tiers fail for a
+  // large share of CJK does the ASCII notice surface; that is decided inside
+  // PushEmbeddedFont and polled here.
+  if (pushembedfont::takePushFontUnavailable()) {
     showFontDamagedMessage = true;
     fontDamagedMessageTime = millis();
   }
@@ -2313,7 +2248,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
                                         const int orientedMarginLeft) {
   const ReaderUtils::ReaderRefreshScope readerRefresh;
   const auto t0 = millis();
-  const int fontId = SETTINGS.getReaderFontId();
+  const int fontId = effectiveReaderFontId();
   ImageBlock::clearRenderFailures();
 
   struct PxcSlotGuard {
@@ -3229,6 +3164,8 @@ void EpubReaderActivity::applyReaderTextSettings() {
   // Locked because the render task can load or unload SD font variants too.
   RenderLock lock;
   sdFontSystem.ensureLoaded(renderer);
+  // S3c: PUSH font size follows the global point size; rebuild if it changed.
+  if (bookPath == "/PUSH.txt") sdFontSystem.ensurePushFont(renderer);
 }
 
 // The More panel carries everything the classic list menu offers except the

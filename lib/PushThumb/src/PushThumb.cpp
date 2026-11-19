@@ -39,13 +39,18 @@ const Glyph* glyphFor(char c) {
 }
 
 // Canvas: 1 bit per pixel, white=1 (background), black=0 (ink).
+// S3c P3: the canvas row stride MUST equal the BMP file stride (4-byte aligned).
+// Previously the canvas used ceil(w/8)=30 B while the BMP writer used 32 B,
+// shifting each row by 2 B and leaving the 2 B tail black — the horizontal
+// stripes seen on device. Now stride=(w+31)/32*4=32 for w=240, fillWhite covers
+// all 32*H bytes (padding included, white), and setBlack indexes y*stride+x/8.
 struct Canvas {
   uint8_t* bits;
-  int w, h;
-  void fillWhite() { std::memset(bits, 0xFF, static_cast<size_t>((w + 7) / 8) * h); }
+  int w, h, stride;
+  void fillWhite() { std::memset(bits, 0xFF, static_cast<size_t>(stride) * h); }
   void setBlack(int x, int y) {
     if (x < 0 || x >= w || y < 0 || y >= h) return;
-    bits[y * ((w + 7) / 8) + (x >> 3)] &= static_cast<uint8_t>(~(0x80 >> (x & 7)));
+    bits[y * stride + (x >> 3)] &= static_cast<uint8_t>(~(0x80 >> (x & 7)));
   }
   // Draw an 8x8 glyph scaled by an integer factor, top-left at (x,y).
   void drawGlyph(char c, int x, int y, int scale) {
@@ -86,7 +91,7 @@ bool writeCoverBmp(WriteFn sink, void* ctx, const CoverInfo& info) {
   if (!pixels) return false;
   std::memset(pixels.get(), 0, pixelsSize);
 
-  Canvas cv{pixels.get(), W, H};
+  Canvas cv{pixels.get(), W, H, rowBytes};
   cv.fillWhite();
 
   // Large centered title.

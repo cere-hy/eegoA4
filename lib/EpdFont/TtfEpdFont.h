@@ -95,6 +95,34 @@ class TtfEpdFont {
   bool build(const char* utf8, uint8_t style = 0);
   bool addCoverage(const char* utf8, uint8_t style = 0);
 
+  // --- Secondary glyph source (S3c PUSH embedded font) -----------------------
+  // When a face's cmap has no glyph for a codepoint, faultGlyph returns null and
+  // missThunk calls the registered secondary handler. The handler may rasterize
+  // the codepoint from another source (e.g. the PIF1 Han bitmap) and inject the
+  // result into this same face via injectGlyph(), so vectorBitmapHandler serves
+  // it on the normal draw path with no renderer changes. Registered per TtfEpdFont
+  // (all styles share it); nullptr by default so every other font is untouched.
+  using SecondaryHandler = bool (*)(void* ctx, uint32_t codepoint, uint8_t style, TtfEpdFont& font);
+  void setSecondaryHandler(SecondaryHandler handler, void* ctx) {
+    secondary_ = handler;
+    secondaryCtx_ = ctx;
+  }
+
+  // Inject an already-2-bit rasterized glyph into `style`'s arena. `bmp2bit` is
+  // byte-packed exactly like EpdFontData (2 bits/px when twoBit, MSB-first;
+  // 1 bit/px otherwise), `bytes` its length. Returns the cached EpdGlyph or null
+  // if the arena/table could not grow. Used only by the secondary handler.
+  const EpdGlyph* injectGlyph(uint8_t style, uint32_t cp, uint8_t w, uint8_t h, const uint8_t* bmp2bit,
+                              uint16_t bytes, int32_t adv12_4, int16_t left, int16_t top);
+
+  // Rasterize a codepoint with THIS font's own FreeType face (no secondary) and
+  // return a pointer to its packed bitmap in this font's arena, plus metrics.
+  // Valid until the next fault/flush on this font. Used by the PUSH secondary
+  // handler to copy an SD-fallback glyph into the PUSH font's arena. Returns
+  // nullptr when this font has no glyph for `cp`.
+  const uint8_t* rasterizedBitmap(uint32_t cp, uint8_t& w, uint8_t& h, uint16_t& bytes, int32_t& adv12_4,
+                                  int16_t& left, int16_t& top, uint8_t style = 0);
+
  private:
   // A borrowed source file (one per style role that the caller supplies).
   struct Source {
@@ -157,6 +185,8 @@ class TtfEpdFont {
     EpdFont font{&data};
   };
 
+  const EpdGlyph* findGlyph(Face& f, uint32_t cp) const;
+
   static const EpdGlyph* missThunk(void* ctx, uint32_t codepoint);
   static const uint8_t* bitmapThunk(void* ctx, const EpdGlyph* glyph);
   static bool coverageThunk(void* ctx, uint32_t codepoint);
@@ -198,6 +228,10 @@ class TtfEpdFont {
   // sink calls releaseResidentCaches() on every TTF font, and tearing down
   // the very faces mid-fault would be use-after-free.
   bool evictionLocked_ = false;
+
+  // S3c secondary glyph source (nullptr for every font except PUSH embedded).
+  SecondaryHandler secondary_ = nullptr;
+  void* secondaryCtx_ = nullptr;
 };
 
 #endif  // CROSSPOINT_VECTOR_FONTS

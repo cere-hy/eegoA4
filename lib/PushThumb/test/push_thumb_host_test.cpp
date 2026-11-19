@@ -51,6 +51,28 @@ int main(void) {
   }
   CHECK(whiteBits > rowBytes * 8 - 8, "top row is white background");
 
+  /* S3c P3: every row's 2-byte padding (240px=30B -> stride 32B) must be white
+     (0xFF). The old bug left these at 0x00 (black), producing horizontal stripes.
+     Also assert rows are not shifted: padding columns must be identical on all
+     rows, and a solid-white row region has no unexpected black bits. */
+  const int pixOff = 14 + 40 + 8;
+  const uint8_t* rows = g_buf + pixOff;
+  int padBlack = 0;
+  for (int r = 0; r < pushthumb::kThumbHeight; ++r) {
+    const uint8_t* row = rows + (size_t)r * rowBytes;
+    if (row[30] != 0xFF || row[31] != 0xFF) ++padBlack;
+  }
+  CHECK(padBlack == 0, "S3c: all 400 rows have white padding (no black stripes)");
+
+  /* Stride proof: rendered ink columns stay within the 240 visible bytes; the
+     padding bytes are never written black even on the rows carrying text. */
+  int textRowPadBlack = 0;
+  for (int r = 96; r < 320; ++r) {  // band containing PUSH + time + bytes text
+    const uint8_t* row = rows + (size_t)r * rowBytes;
+    if (row[30] != 0xFF || row[31] != 0xFF) ++textRowPadBlack;
+  }
+  CHECK(textRowPadBlack == 0, "S3c: text rows keep white padding (no per-row shift)");
+
   /* Different byte counts must change pixels (cover reflects content). */
   uint8_t snapshot[256*1024]; size_t snapLen;
   memcpy(snapshot, g_buf, g_len); snapLen = g_len;

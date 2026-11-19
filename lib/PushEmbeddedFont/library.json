@@ -1,0 +1,12 @@
+{
+  "name": "PushEmbeddedFont",
+  "version": "1.0.0",
+  "description": "S3c embedded font fallback: builtin.ttf vector + PIF1 Han bitmap + SD fallback, per-codepoint",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  },
+  "dependencies": {
+    "miniz": "*"
+  }
+}

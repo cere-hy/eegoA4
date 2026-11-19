@@ -8,6 +8,7 @@
 #include <esp_heap_caps.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace {
 
@@ -574,6 +575,25 @@ const EpdGlyph* TtfEpdFont::faultGlyph(Face& f, const uint32_t cp, const bool al
   return &f.glyphs[newIdx];
 }
 
+const uint8_t* TtfEpdFont::rasterizedBitmap(const uint32_t cp, uint8_t& w, uint8_t& h, uint16_t& bytes,
+                                            int32_t& adv12_4, int16_t& left, int16_t& top, const uint8_t style) {
+  if (style >= 4 || !loaded_) return nullptr;
+  Face& f = faces_[style];
+  // faultGlyph uses only this face's FreeType cmap (it does NOT call secondary_),
+  // so this is safe to call from a secondary handler without recursion.
+  const EpdGlyph* g = faultGlyph(f, cp, /*allowFlush=*/true);
+  if (!g || g->dataLength == 0) return nullptr;
+  const uint8_t* bmp = bitmapThunk(&f, g);
+  if (!bmp) return nullptr;
+  w = g->width;
+  h = g->height;
+  bytes = g->dataLength;
+  adv12_4 = g->advanceX;
+  left = g->left;
+  top = g->top;
+  return bmp;
+}
+
 int8_t TtfEpdFont::faultKern(Face& f, const uint32_t leftCp, const uint32_t rightCp) {
   if (leftCp == 0 || rightCp == 0) return 0;
   if (!f.inited || (master_ && !master_->faces_[&f - faces_].ready)) initFace(f);
@@ -614,7 +634,79 @@ int8_t TtfEpdFont::faultKern(Face& f, const uint32_t leftCp, const uint32_t righ
 
 const EpdGlyph* TtfEpdFont::missThunk(void* ctx, const uint32_t codepoint) {
   Face* f = static_cast<Face*>(ctx);
-  return f->owner->faultGlyph(*f, codepoint);
+  const EpdGlyph* g = f->owner->faultGlyph(*f, codepoint);
+  if (g != nullptr || f->owner->secondary_ == nullptr) return g;
+  // S3c: cmap had no glyph. Let the secondary source (PIF1 bitmap / SD fallback)
+  // rasterize this codepoint into the same face arena, then re-resolve it so the
+  // normal vectorBitmapHandler path serves the bitmap. One attempt only: a
+  // secondary miss leaves the replacement glyph to EpdFont::getGlyph().
+  const size_t style = static_cast<size_t>(f - f->owner->faces_);
+  f->owner->secondary_(f->owner->secondaryCtx_, codepoint, static_cast<uint8_t>(style), *f->owner);
+  return f->owner->findGlyph(*f, codepoint);
+}
+
+const EpdGlyph* TtfEpdFont::findGlyph(Face& f, const uint32_t cp) const {
+  const auto it = std::lower_bound(f.cps.begin(), f.cps.end(), cp);
+  if (it != f.cps.end() && *it == cp) {
+    return &f.glyphs[f.slot[static_cast<size_t>(it - f.cps.begin())]];
+  }
+  return nullptr;
+}
+
+const EpdGlyph* TtfEpdFont::injectGlyph(const uint8_t style, const uint32_t cp, const uint8_t w, const uint8_t h,
+                                        const uint8_t* bmp2bit, const uint16_t bytes, const int32_t adv12_4,
+                                        const int16_t left, const int16_t top) {
+  if (style >= 4 || !loaded_) return nullptr;
+  Face& f = faces_[style];
+  // Same face-initialization contract as faultGlyph so the arena is live.
+  if (!f.inited || (master_ && !master_->faces_[style].ready)) {
+    // Secondary fonts are never variants; still, guard like faultGlyph does.
+    if (!f.inited) return nullptr;
+  }
+  if (!f.ready) return nullptr;
+  // Already present (e.g. two secondary tiers raced) → return cached.
+  if (findGlyph(f, cp)) return findGlyph(f, cp);
+
+  // Route exactly like faultGlyph: core until coreCount/coreCap exhausted, then tail.
+  if (!f.coreFull && (f.coreCount >= f.maxCoreGlyphs || f.coreUsed + bytes > f.coreCap)) f.coreFull = true;
+  const bool isTail = f.coreFull || f.coreCap == 0;
+  if (isTail && (f.glyphs.size() - f.coreCount >= f.maxTailGlyphs || f.tailUsed + bytes > f.tailCap)) {
+    return nullptr;  // secondary glyphs are a sparse supplement; never flush the page cache
+  }
+  if (!isTail && f.coreUsed + bytes > f.coreCap) return nullptr;
+
+  static constexpr size_t kTableStep = 64;
+  const auto growTables = [&]() {
+    return reserveChecked(f.glyphs, f.glyphs.size() + 1, kTableStep, f.maxGlyphs) &&
+           reserveChecked(f.cps, f.cps.size() + 1, kTableStep, f.maxGlyphs) &&
+           reserveChecked(f.slot, f.slot.size() + 1, kTableStep, f.maxGlyphs);
+  };
+  if (!growTables()) return nullptr;
+
+  auto& bmpVec = isTail ? f.tailBmp : f.coreBmp;
+  size_t& bmpUsed = isTail ? f.tailUsed : f.coreUsed;
+  const size_t bmpCap = isTail ? f.tailCap : f.coreCap;
+  if (bytes > bmpCap || !reserveChecked(bmpVec, bmpUsed + bytes, 4096, bmpCap)) return nullptr;
+  if (bmpVec.size() < bmpUsed + bytes) bmpVec.resize(bmpUsed + bytes, 0);
+  if (bytes) std::memcpy(bmpVec.data() + bmpUsed, bmp2bit, bytes);
+
+  EpdGlyph eg{};
+  eg.width = w;
+  eg.height = h;
+  eg.advanceX = static_cast<uint16_t>(adv12_4 < 0 ? 0 : adv12_4);
+  eg.left = left;
+  eg.top = top;
+  eg.dataOffset = static_cast<uint32_t>(bmpUsed);
+  eg.dataLength = bytes;
+  bmpUsed += bytes;
+  f.glyphs.push_back(eg);
+  if (!isTail) f.coreCount++;
+  const uint16_t newIdx = static_cast<uint16_t>(f.glyphs.size() - 1);
+  const auto it = std::lower_bound(f.cps.begin(), f.cps.end(), cp);
+  const size_t pos = static_cast<size_t>(it - f.cps.begin());
+  f.cps.insert(it, cp);
+  f.slot.insert(f.slot.begin() + pos, newIdx);
+  return &f.glyphs[newIdx];
 }
 int8_t TtfEpdFont::kernThunk(void* ctx, const uint32_t leftCp, const uint32_t rightCp) {
   Face* f = static_cast<Face*>(ctx);
