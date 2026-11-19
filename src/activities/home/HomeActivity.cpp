@@ -27,7 +27,7 @@
 #include "fontIds.h"
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 4;  // File Browser, Library, File transfer, Settings
+  int count = 5;  // File Browser, Library, File transfer, Settings, PUSH (S3)
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -339,6 +339,9 @@ void HomeActivity::loop() {
       case HomeMenuItem::SETTINGS_MENU:
         onSettingsOpen();
         break;
+      case HomeMenuItem::PUSH:
+        onPushOpen();
+        break;
       default:
         break;
     }
@@ -550,8 +553,8 @@ void HomeActivity::render(RenderLock&&) {
 
   // Build menu items dynamically
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings};
+                                        tr(STR_SETTINGS_TITLE), tr(STR_PUSH)};
+  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings, Text};
 
   if (slotItem() != HomeMenuItem::NONE) {
     menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
@@ -578,6 +581,11 @@ void HomeActivity::render(RenderLock&&) {
                                             tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
+  if (pushNoticePending) {
+    GUI.drawPopup(renderer, tr(STR_NO_PUSH_CONTENT));
+    pushNoticePending = false;
+  }
+
   renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 
   firstRenderDone = true;
@@ -601,3 +609,15 @@ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 
 void HomeActivity::onPluginsOpen() { activityManager.goToPlugins(); }
+
+void HomeActivity::onPushOpen() {
+  // S3: manual entry to the pushed document. Reuse the normal reader path with
+  // the fixed book path (same string used for cache-key hashing on commit).
+  const char* kPushPath = "/PUSH.txt";
+  if (Storage.exists(kPushPath)) {
+    activityManager.goToReader(kPushPath);
+  } else {
+    pushNoticePending = true;  // rendered once on next frame; button never hides
+    requestUpdate();
+  }
+}

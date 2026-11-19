@@ -1,18 +1,30 @@
-// B6.5 S2 — text-push GATT glue. See include/PushTextSink.h.
+// B6.5 S2/S3 — text-push glue. See include/PushTextSink.h.
 #include "PushTextSink.h"
 
 #if defined(FREEINK_DEVICE_EEGO_A4) && FREEINK_DEVICE_EEGO_A4
 
 #include <Arduino.h>
 #include <BlePushGatt.h>
+#include <Epub.h>  // clearCache() — lib-side, usable from a lib (BookCacheUtils.h is src/)
+#include <HalStorage.h>
 #include <Logging.h>
+#include <PushTextFilter.h>
 #include <push_sink_core.h>
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
+#include <string>
 
 namespace pushtextsink {
 namespace {
+
+// ---- paths (fixed; book name is a hardcoded constant per S3 decision) ----
+constexpr const char* kPartDir = "/.readpico";
+constexpr const char* kPartPath = "/.readpico/push.part";
+constexpr const char* kBakPath = "/PUSH.txt.bak";
+constexpr const char* kTmpPath = "/PUSH.txt.tmp";
+constexpr const char* kBookPath = "/PUSH.txt";  // cache hash key must match reader's path exactly
 
 // The one session core. Static storage — no heap. Touched ONLY on the NimBLE
 // host task from the CTRL/DATA callbacks below (serialized on that task).
@@ -20,12 +32,26 @@ push_sink_core_t g_core;
 bool g_ready = false;
 uint16_t g_token = 0;
 
+// .part streaming handle (HalFile, host task only). Opened with O_WRONLY|O_CREAT
+// (no truncate) and seeked to end, so fresh BEGIN (file removed first) starts at
+// 0 and a resume appends.
+HalFile g_part;
+bool g_partOpen = false;
+uint32_t g_partStartMs = 0;
+uint32_t g_partBytes = 0;  // appends this session (for logging)
+
+// BEGIN fields captured for END verification (core also keeps them, but a
+// previous RESUME_QUERY may have re-adopted; these stay authoritative).
+uint32_t g_expectCrc = 0;
+uint32_t g_expectLen = 0;
+bool g_haveBegin = false;
+
 // PROGRESS throttle: at most one status notification per 400 ms.
 uint32_t g_lastProgressMs = 0;
 constexpr uint32_t kProgressGapMs = 400u;
 
 void logf(const char* fmt, ...) {
-  char line[160];
+  char line[200];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(line, sizeof(line), fmt, ap);
@@ -33,80 +59,273 @@ void logf(const char* fmt, ...) {
   logPrintf("INF", "BLE", "PUSH %s", line);
 }
 
-// Drive the core to CONNECTED from whatever state it is in, so a BEGIN (or a
-// RESUME_QUERY after reconnect) is always accepted and answered:
-//   IDLE      -> ARM -> ADV_UP -> CONNECT  (first session)
-//   ARMED     -> ADV_UP -> CONNECT
-//   WINDOW    -> CONNECT
-//   CONNECTED -> no-op on each step
-//   RECEIVING / PROCESSING / COOLDOWN -> DISCONNECT -> WINDOW -> CONNECT
-// The DISCONNECT step deliberately collapses a session left half-received by a
-// link drop back to WINDOW, so the reconnect gets a clean handshake instead of
-// an illegal-transition swallow. None of these steps emit a STATUS frame; the
-// only STATUS after this sequence is the one produced by the CTRL event that
-// follows.
-void driveConnected(uint32_t now_ms) {
-  if (g_core.sess.state == PUSH_STATE_IDLE) {
-    // Always-on window: window_ms=0 -> never times out; no cooldown in S2.
-    push_sink_core_arm(&g_core, g_token, 0u, 0u, now_ms);
+// ---- .part lifecycle -----------------------------------------------------
+
+void closePart() {
+  if (g_partOpen) {
+    g_part.flush();
+    g_part.close();
+    g_partOpen = false;
   }
-  push_sink_core_disconnect(&g_core);  // connected-ish -> WINDOW
-  push_sink_core_adv_up(&g_core);      // ARMED -> WINDOW
-  push_sink_core_connect(&g_core);     // WINDOW -> CONNECTED
 }
 
-// Take the core's latest STATUS frame (consume it) and emit it up STATUS(..13)
-// through the independent-mbuf path. READY/RESUME/DONE/ERR go out immediately;
-// PROGRESS is throttled to one per 400 ms. Clearing status_len after the read
-// gives take semantics so a later no-status event cannot re-send a stale frame.
+/// Fresh BEGIN: ensure dir, remove stale part, open for append-at-0.
+bool beginPart() {
+  closePart();
+  if (!Storage.exists(kPartDir) && !Storage.mkdir(kPartDir)) {
+    logf("part mkdir FAIL %s", kPartDir);
+    return false;
+  }
+  if (Storage.exists(kPartPath) && !Storage.remove(kPartPath)) {
+    logf("part remove FAIL %s", kPartPath);
+    return false;
+  }
+  g_part = Storage.open(kPartPath, O_WRONLY | O_CREAT);
+  if (!g_part) {
+    logf("part open FAIL %s", kPartPath);
+    return false;
+  }
+  g_partOpen = true;
+  g_partStartMs = millis();
+  g_partBytes = 0;
+  return true;
+}
+
+/// Resume: open existing .part and seek to end (append).
+bool resumePart() {
+  closePart();
+  if (!Storage.exists(kPartPath)) return false;
+  g_part = Storage.open(kPartPath, O_WRONLY | O_CREAT);
+  if (!g_part) return false;
+  g_partOpen = true;
+  g_part.seekSet(g_part.size());
+  g_partBytes = (uint32_t)g_part.size();
+  g_partStartMs = millis();
+  logf("part resume offset=%u", (unsigned)g_partBytes);
+  return true;
+}
+
+/// Append a DATA payload to the open .part handle. false = short write.
+bool appendPart(const uint8_t* payload, size_t len) {
+  if (!g_partOpen || !payload) return false;
+  const size_t w = g_part.write(payload, len);
+  if (w != len) {
+    logf("part append SHORT %u/%u", (unsigned)w, (unsigned)len);
+    closePart();
+    return false;
+  }
+  g_partBytes += (uint32_t)len;
+  return true;
+}
+
+// ---- verify + clean + commit ---------------------------------------------
+
+/// Read .part back in 512B chunks: full CRC32 + byte count.
+static bool verifyPart(uint32_t* outCrc, uint32_t* outLen) {
+  if (!Storage.exists(kPartPath)) return false;
+  HalFile f;
+  if (!Storage.openFileForRead("PUSH", kPartPath, f)) return false;
+  uint8_t buf[512];
+  uint32_t crc = 0, total = 0;
+  int n;
+  while ((n = f.read(buf, sizeof(buf))) > 0) {
+    crc = push_crc32_continue(crc, buf, (size_t)n);
+    total += (uint32_t)n;
+  }
+  if (n < 0) return false;
+  *outCrc = crc;
+  *outLen = total;
+  return true;
+}
+
+/// Six-step clean raw .part -> std::string.
+static bool cleanPart(std::string& outClean) {
+  if (!Storage.readFileToString("PUSH", kPartPath, PUSH_TOTAL_MAX + 1, outClean)) {
+    logf("clean read FAIL");
+    return false;
+  }
+  char* cleaned = NULL;
+  push_filter_stats_t st;
+  const size_t inLen = outClean.size();
+  size_t n = push_text_filter(outClean.data(), inLen, &cleaned, &st);
+  if (cleaned == NULL || n == (size_t)-1) {
+    if (cleaned) push_text_filter_free(cleaned);
+    logf("clean filter FAIL");
+    return false;
+  }
+  outClean.assign(cleaned, n);
+  push_text_filter_free(cleaned);
+  logf("clean in=%u out=%u ctrl=%u tail=%u blank=%u img=%u fence=%u unclosed=%d",
+       (unsigned)inLen, (unsigned)n, (unsigned)st.removed_controls,
+       (unsigned)st.dropped_utf8_tail, (unsigned)st.collapsed_runs,
+       (unsigned)st.images_removed, (unsigned)st.code_fences, st.unclosed_fence ? 1 : 0);
+  return true;
+}
+
+/// Transactional four-beat: PUSH.txt -> .bak -> tmp(cleaned) -> PUSH.txt -> clear .bak.
+static bool commitDocument(const std::string& cleaned) {
+  {  // 1) cleaned -> tmp
+    HalFile t;
+    if (!Storage.openFileForWrite("PUSH", kTmpPath, t)) {
+      logf("commit tmp open FAIL");
+      return false;
+    }
+    const size_t w = t.write(reinterpret_cast<const uint8_t*>(cleaned.data()), cleaned.size());
+    t.flush();
+    if (w != cleaned.size()) {
+      logf("commit tmp short %u/%u", (unsigned)w, (unsigned)cleaned.size());
+      return false;
+    }
+  }  // closed before rename
+  bool hadBak = false;
+  if (Storage.exists(kBookPath)) {  // 2) old -> .bak
+    Storage.remove(kBakPath);
+    if (!Storage.rename(kBookPath, kBakPath)) {
+      logf("commit backup FAIL");
+      Storage.remove(kTmpPath);
+      return false;
+    }
+    hadBak = true;
+  }
+  if (!Storage.rename(kTmpPath, kBookPath)) {  // 3) tmp -> PUSH.txt
+    logf("commit rename FAIL; rollback");
+    if (hadBak) {
+      Storage.remove(kBookPath);
+      Storage.rename(kBakPath, kBookPath);
+    }
+    return false;
+  }
+  if (hadBak) Storage.remove(kBakPath);  // 4) clear .bak
+  // Fresh open → page 1, fresh layout. Cache key = hash(filepath) fixed to
+  // kBookPath, identical to the reader's; Epub::clearCache drops the whole dir.
+  {
+    Epub epub(kBookPath, "/.crosspoint");
+    epub.clearCache();
+  }
+  return true;
+}
+
+/// Drive the core to CONNECTED from whatever state it is in.
+void driveConnected(uint32_t now_ms) {
+  if (g_core.sess.state == PUSH_STATE_IDLE) {
+    push_sink_core_arm(&g_core, g_token, 0u, 0u, now_ms);
+  }
+  push_sink_core_disconnect(&g_core);
+  push_sink_core_adv_up(&g_core);
+  push_sink_core_connect(&g_core);
+}
+
+/// Take the core's latest STATUS frame (consume) and emit via independent mbuf.
 void emitStatus(uint32_t now_ms) {
   uint8_t frame[PUSH_CORE_STATUS_CAP];
   size_t n = push_sink_core_status(&g_core, frame, sizeof(frame));
-  g_core.status_len = 0;  // take: consume whatever the core just produced
+  g_core.status_len = 0;  // take semantics
   if (n == 0) return;
-
   const uint8_t op = frame[0];
   if (op == PUSH_ST_PROGRESS) {
-    if (g_lastProgressMs != 0 && (uint32_t)(now_ms - g_lastProgressMs) < kProgressGapMs) {
-      return;  // throttled: a later PROGRESS/DONE supersedes this one
-    }
+    if (g_lastProgressMs != 0 && (uint32_t)(now_ms - g_lastProgressMs) < kProgressGapMs) return;
     g_lastProgressMs = now_ms;
   } else {
-    // READY/RESUME/DONE/ERR are never throttled. Reset the progress window so
-    // the first DATA of the next session can report immediately.
     g_lastProgressMs = 0;
   }
-
   const bool ok = blepushgatt::sendStatusFrame(frame, n);
   logf("STATUS op=0x%02X len=%u notify=%s", (unsigned)op, (unsigned)n, ok ? "ok" : "FAIL");
 }
 
-// CTRL hook. op is the opcode byte at offset 2; frame is the whole CTRL frame.
-// 0x07/0x08 are routed to their dedicated hooks by B3 and never reach here.
+// CTRL hook. 0x07/0x08 are routed to their dedicated hooks by B3, never here.
 void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
   if (!g_ready || frame == nullptr) return;
   const uint32_t now = millis();
 
-  if (op == PUSH_OP_BEGIN || op == PUSH_OP_RESUME_QUERY) {
+  if (op == PUSH_OP_BEGIN) {
     driveConnected(now);
-    logf("CTRL op=0x%02X recv (driven to CONNECTED, state=%d)", (unsigned)op,
-         (int)g_core.sess.state);
+    push_begin_t b;
+    if (push_begin_decode(frame, len, &b)) {
+      g_expectCrc = b.crc32;
+      g_expectLen = b.total_len;
+      g_haveBegin = true;
+    }
+    beginPart();  // fresh document: truncate .part
+    logf("CTRL BEGIN len=%u crc=0x%08X type=%u state=%d",
+         (unsigned)g_expectLen, (unsigned)g_expectCrc,
+         (unsigned)(g_haveBegin ? g_core.sess.begin.type : 0), (int)g_core.sess.state);
+    push_sink_core_on_ctrl(&g_core, frame, len);
+    emitStatus(now);
+    return;
+  }
+
+  if (op == PUSH_OP_RESUME_QUERY) {
+    driveConnected(now);
+    if (Storage.exists(kPartPath)) {
+      uint32_t sz = 0;
+      HalFile f;
+      if (Storage.openFileForRead("PUSH", kPartPath, f)) sz = (uint32_t)f.size();
+      // Re-adopt true offset so ST_RESUME carries received/next_seq.
+      push_sink_core_adopt(&g_core, &g_core.sess.begin, sz,
+                           (uint16_t)((sz / PUSH_DATA_PAYLOAD_MAX) + 1u));
+      resumePart();
+      logf("CTRL RESUME_QUERY adopt offset=%u", (unsigned)sz);
+    }
+    push_sink_core_on_ctrl(&g_core, frame, len);
+    emitStatus(now);
+    return;
+  }
+
+  if (op == PUSH_OP_END) {
+    closePart();
+    // Verify from disk BEFORE feeding END: inject the external CRC verdict so
+    // the core's VERIFY uses our full-file CRC (covers resume segments too).
+    uint32_t crc = 0, len_on_disk = 0;
+    bool readOk = verifyPart(&crc, &len_on_disk);
+    bool crcOk = readOk && g_haveBegin && (crc == g_expectCrc) && (len_on_disk == g_expectLen);
+    logf("END verify read=%s crc=%s disk=%u/%u want=%u/%u ms=%u",
+         readOk ? "ok" : "FAIL", crcOk ? "MATCH" : "MISMATCH",
+         (unsigned)len_on_disk, (unsigned)crc, (unsigned)g_expectLen, (unsigned)g_expectCrc,
+         (unsigned)(millis() - g_partStartMs));
+    push_sink_core_set_verified_crc(&g_core, crcOk);
+    push_sink_core_on_ctrl(&g_core, frame, len);
+
+    if (push_sink_core_take_commit(&g_core)) {
+      uint32_t t0 = millis();
+      std::string cleaned;
+      if (cleanPart(cleaned) && commitDocument(cleaned)) {
+        logf("COMMIT ok bytes=%u ms=%u", (unsigned)cleaned.size(), (unsigned)(millis() - t0));
+        Storage.remove(kPartPath);  // fully consumed — safe to drop
+      } else {
+        // Keep .part so a retry can rebuild the document without a re-push.
+        logf("COMMIT FAIL — original PUSH.txt preserved, .part kept for retry");
+      }
+    }
+    // DONE/ERR produced by the core; send after commit so DONE means "book ready".
+    emitStatus(now);
+    return;
+  }
+
+  if (op == PUSH_OP_ABORT) {
+    closePart();
+    logf("CTRL ABORT");
   } else {
     logf("CTRL op=0x%02X recv (state=%d)", (unsigned)op, (int)g_core.sess.state);
   }
-
   push_sink_core_on_ctrl(&g_core, frame, len);
   emitStatus(now);
-
-  // S2 does not consume commit_ready/open_ready (S3 persistence / S4 auto-open).
-  // They stay latched in the core for the later batches.
 }
 
 // DATA hook. Frame is raw seq(u16 LE)+len(u8)+payload, no opcode.
 void onData(const uint8_t* frame, size_t len) {
   if (!g_ready || frame == nullptr) return;
   const uint32_t now = millis();
-  push_sink_core_on_data(&g_core, frame, len);
+  uint16_t seq = 0;
+  const uint8_t* payload = NULL;
+  size_t payload_len = 0;
+  const bool decodable = push_data_decode(frame, len, &seq, &payload, &payload_len);
+
+  const uint32_t acts = push_sink_core_on_data(&g_core, frame, len);
+  if ((acts & PUSH_ACT_APPEND) && decodable) {
+    if (!appendPart(payload, payload_len)) {
+      push_sink_core_cancel(&g_core);
+    }
+  }
   emitStatus(now);
 }
 
@@ -116,16 +335,17 @@ void init() {
   if (g_ready) return;
   push_sink_core_init(&g_core);
   g_token = blepushgatt::tokenFromStaMac();
-  // Pre-wire the state machine to WINDOW so the very first BEGIN only needs a
-  // CONNECT step; driveConnected() also covers a cold IDLE as a fallback.
   push_sink_core_arm(&g_core, g_token, 0u, 0u, millis());
   push_sink_core_adv_up(&g_core);
   g_lastProgressMs = 0;
+  g_partOpen = false;
+  g_partBytes = 0;
+  g_haveBegin = false;
   g_ready = true;
 
   blepushgatt::setCtrlHandler(&onCtrl);
   blepushgatt::setDataHandler(&onData);
-  logf("sink init: token=0x%04X state=%d (ctrl+data hooks registered)",
+  logf("sink init: token=0x%04X state=%d (persist+clean enabled)",
        (unsigned)g_token, (int)g_core.sess.state);
 }
 

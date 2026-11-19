@@ -1,0 +1,15 @@
+{
+  "name": "PushTextFilter",
+  "version": "0.1.0",
+  "description": "B6.5 S3 lightweight Markdown fallback sanitizer for text push: 6-step idempotent UTF-8 clean (control chars, utf8 tail, newlines, whitespace w/ code-block preserve, markdown strip, image placeholders). Content-detected, not type-driven.",
+  "keywords": "text, markdown, sanitize, utf8, idempotent, eego-a4, push",
+  "authors": {
+    "name": "eegoA4-rebuild",
+    "email": "rebuild@local"
+  },
+  "license": "Apache-2.0",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  }
+}
