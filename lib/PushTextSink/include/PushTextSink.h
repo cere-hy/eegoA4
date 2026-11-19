@@ -40,4 +40,10 @@ namespace pushtextsink {
 // Call once in setup(), after blepushgatt::begin(). Non-A4 builds are inert.
 void init();
 
+// S3b P3: after a successful commit, a one-shot flag is raised on the NimBLE
+// host task. The main loop consumes it (pump on the UI/render task) and performs
+// the auto-open decision there — never call UI/ActivityManager from the host
+// task. Returns true once per completed push.
+bool takePushCompleted();
+
 }  // namespace pushtextsink

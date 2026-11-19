@@ -1,0 +1,9 @@
+{
+  "name": "PushThumb",
+  "version": "1.0.0",
+  "description": "S3b deterministic 1-bit ASCII cover thumbnail for PUSH document",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "include"
+  }
+}

@@ -171,6 +171,13 @@ class EpubReaderActivity final : public ReaderActivity {
   static constexpr size_t BUILD_POPUP_BYTE_THRESHOLD = 96 * 1024;
   static constexpr unsigned long BUILD_POPUP_DEADLINE_MS = 1000;
   bool buildPopupPending = false;
+  // S3b P1: one-shot glyph prewarm for pushed plain text. The vector reader
+  // font faults glyphs from the 25 MB SD TTF on demand; pre-faulting the whole
+  // document's unique character set once before layout removes that per-page
+  // SD churn. Only for /PUSH.txt; reset on a fresh activity.
+  bool pushGlyphsPrewarmed_ = false;
+  bool pushFontMissingNotified_ = false;  // S3b P1: >20% CJK glyphs missing
+  void prewarmPushGlyphs();
   void showBuildPopup(GfxRenderer& renderer, int& pagesUntilFullRefresh);
   bool applyDeferredReposition();
   void clearDeferredReposition();

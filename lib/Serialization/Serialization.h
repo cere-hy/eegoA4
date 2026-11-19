@@ -59,9 +59,20 @@ inline void readString(std::istream& is, std::string& s) {
   is.read(&s[0], len);
 }
 
+// S3b P0 guard: a torn/corrupt cache file can yield a garbage length here.
+// resize(len) with a bogus len threw std::length_error and aborted the device
+// (PC 0x4224ed47, readSpineEntryFrom). Clamp to a sane cap and to the bytes
+// actually remaining so a damaged file degrades to an empty/short string
+// instead of crashing. All callers treat the string as metadata only.
 inline void readString(HalFile& file, std::string& s) {
   uint32_t len;
   readPod(file, len);
+  constexpr uint32_t kMaxStringLen = 64 * 1024;
+  const int remaining = file.available();
+  if (len > kMaxStringLen || remaining < 0 || len > static_cast<uint32_t>(remaining)) {
+    s.clear();
+    return;
+  }
   s.resize(len);
   file.read(&s[0], len);
 }

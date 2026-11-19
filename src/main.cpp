@@ -872,6 +872,22 @@ void loop() {
   // hex留证). Cheap no-op when no frame pending; never blocks the loop.
   aireceivesink::pump();
 
+  // S3b P3: a completed push raises a one-shot flag on the NimBLE host task.
+  // Decide auto-open HERE on the loop task (never from the host task). Policies:
+  //  - reading PUSH  -> reopen via goToReader (fresh Activity, page 1, full refresh)
+  //  - reading another book -> do NOT switch or interrupt (corner hint is S4)
+  //  - home / elsewhere -> auto-open PUSH
+  if (pushtextsink::takePushCompleted()) {
+    const bool readingPush = activityManager.isForegroundPushReader();
+    const bool readingOther = activityManager.isForegroundReader() && !readingPush;
+    if (readingOther) {
+      LOG_INF("PUSH", "completed while reading another book; staying put");
+    } else {
+      LOG_INF("PUSH", "completed; auto-opening PUSH (readingPush=%d)", readingPush ? 1 : 0);
+      activityManager.goToReader("/PUSH.txt");
+    }
+  }
+
   // Bluetooth page turner, before the USB drive's early return: a card handed to USB stops the radio
   // before anything else.
   bleturner::Scene scene{};

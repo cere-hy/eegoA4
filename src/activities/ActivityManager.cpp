@@ -416,6 +416,13 @@ bool ActivityManager::isForegroundReader() const {
   return pendingAction == PendingAction::None && currentActivity && currentActivity->isReaderActivity();
 }
 
+bool ActivityManager::isForegroundPushReader() const {
+  if (!isForegroundReader()) return false;
+  // ActivityManager is a friend of ReaderActivity, so protected bookPath is visible.
+  auto* reader = static_cast<ReaderActivity*>(currentActivity.get());
+  return reader && reader->bookPath == "/PUSH.txt";
+}
+
 bool ActivityManager::isRemoteReaderContext() const {
   return pendingAction == PendingAction::None && currentActivity && currentActivity->acceptsRemoteInput();
 }

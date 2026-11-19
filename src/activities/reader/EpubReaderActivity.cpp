@@ -24,6 +24,7 @@
 #include <array>
 #include <functional>
 #include <iterator>
+#include <set>
 #include <limits>
 
 #include "ChapterBuildGate.h"
@@ -255,6 +256,30 @@ bool EpubReaderActivity::loadBook() {
     return false;
   }
 
+  // S3b P0: consume the push "dirty" marker. The push commit no longer clears
+  // this book's cache mid-session (which aborted a reader paging old content);
+  // it drops this marker instead. On the NEXT open we invalidate the whole cache
+  // here (book.bin + sections + progress.bin, so page 1), then remove the marker.
+  // Literal kept in sync with PushTextSink.cpp (kDirtyPath).
+  if (bookPath == "/PUSH.txt") {
+    constexpr const char* kDirtyPath = "/.crosspoint/push_dirty";
+    if (Storage.exists(kDirtyPath)) {
+      LOG_INF("ERS", "PUSH dirty marker found; invalidating cache (keeping cover)");
+      // Selective invalidation: drop the derived caches (book.bin, progress,
+      // sections, html, css) but KEEP thumb_400.bmp that the push just generated
+      // (clearCache() would removeDir the whole tree, wiping the cover too).
+      const std::string cdir = loadedEpub->getCachePath();
+      Storage.remove((cdir + "/book.bin").c_str());
+      Storage.remove((cdir + "/progress.bin").c_str());
+      Storage.remove((cdir + "/progress.bin.tmp").c_str());
+      Storage.remove((cdir + "/css_rules.cache").c_str());
+      Storage.removeDir((cdir + "/sections").c_str());
+      Storage.removeDir((cdir + "/html").c_str());
+      Storage.removeDir((cdir + "/css").c_str());
+      Storage.remove(kDirtyPath);
+    }
+  }
+
   const bool uncached = !Storage.exists((loadedEpub->getCachePath() + "/book.bin").c_str());
   if (uncached) {
     disableFastInitialRefresh();
@@ -321,7 +346,99 @@ bool EpubReaderActivity::loadBook() {
   }
 
   loadLinkStack();
+  // S3b P1: fault the whole pushed document's glyph set before layout, so the
+  // vector font doesn't hit SD once per character during pagination.
+  prewarmPushGlyphs();
   return true;
+}
+
+// S3b P1 — one-shot glyph prewarm for pushed plain text. The vector reader font
+// (LXGWWenKai 25 MB TTF on SD) faults glyphs one by one during layout, which made
+// a 5k-char document take ~13 s to paginate. We read the source text once, build
+// the unique-codepoint set, and fault all those glyphs into the PSRAM glyph cache
+// up front via the existing FontCacheManager::prewarmCache -> TtfEpdFont path.
+// Measured: 5000 CJK chars ~= 720 unique codepoints, well under the 4096-glyph
+// cache capacity, so no mid-pass flush. Non-PUSH books are untouched.
+void EpubReaderActivity::prewarmPushGlyphs() {
+  if (pushGlyphsPrewarmed_) return;
+  pushGlyphsPrewarmed_ = true;
+  if (bookPath != "/PUSH.txt") return;
+
+  auto* fcm = renderer.getFontCacheManager();
+  if (!fcm) return;
+
+  std::string raw;
+  // 512 KB protocol cap + slack; PUSH content is a few KB in practice.
+  if (!Storage.readFileToString("ERS", "/PUSH.txt", 512 * 1024 + 1, raw) || raw.empty()) return;
+
+  // Collect unique Unicode codepoints (valid UTF-8 only), preserving order of
+  // first appearance for deterministic caches.
+  std::set<uint32_t> cps;
+  for (size_t i = 0; i < raw.size();) {
+    const unsigned char b0 = static_cast<unsigned char>(raw[i]);
+    uint32_t cp = 0;
+    size_t n = 0;
+    if (b0 < 0x80) { cp = b0; n = 1; }
+    else if ((b0 & 0xE0) == 0xC0 && i + 1 < raw.size()) {
+      cp = ((b0 & 0x1F) << 6) | (static_cast<unsigned char>(raw[i+1]) & 0x3F); n = 2;
+    } else if ((b0 & 0xF0) == 0xE0 && i + 2 < raw.size()) {
+      cp = ((b0 & 0x0F) << 12) | ((static_cast<unsigned char>(raw[i+1]) & 0x3F) << 6) |
+           (static_cast<unsigned char>(raw[i+2]) & 0x3F); n = 3;
+    } else if ((b0 & 0xF8) == 0xF0 && i + 3 < raw.size()) {
+      cp = ((b0 & 0x07) << 18) | ((static_cast<unsigned char>(raw[i+1]) & 0x3F) << 12) |
+           ((static_cast<unsigned char>(raw[i+2]) & 0x3F) << 6) | (static_cast<unsigned char>(raw[i+3]) & 0x3F); n = 4;
+    } else { ++i; continue; }  // invalid lead byte: skip
+    if (cp != 0 && cp != 0xFFFD) cps.insert(cp);
+    i += n;
+  }
+  if (cps.empty()) return;
+
+  // Re-encode unique codepoints into one UTF-8 string for prewarmCache().
+  std::string uniq;
+  uniq.reserve(cps.size() * 3);
+  char buf[4];
+  for (uint32_t cp : cps) {
+    if (cp < 0x80) { buf[0] = static_cast<char>(cp); uniq.append(buf, 1); }
+    else if (cp < 0x800) {
+      buf[0] = static_cast<char>(0xC0 | (cp >> 6)); buf[1] = static_cast<char>(0x80 | (cp & 0x3F));
+      uniq.append(buf, 2);
+    } else if (cp < 0x10000) {
+      buf[0] = static_cast<char>(0xE0 | (cp >> 12)); buf[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+      buf[2] = static_cast<char>(0x80 | (cp & 0x3F)); uniq.append(buf, 3);
+    } else {
+      buf[0] = static_cast<char>(0xF0 | (cp >> 18)); buf[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+      buf[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); buf[3] = static_cast<char>(0x80 | (cp & 0x3F));
+      uniq.append(buf, 4);
+    }
+  }
+  uniq.push_back('\0');
+
+  const int fontId = SETTINGS.getReaderFontId();
+  // S3b P1 (missing-glyph guard): if a large share of CJK codepoints are not
+  // covered by the reader font, pages render as solid boxes and the user has no
+  // idea why. Detect it here and surface the existing ASCII "Damaged font file"
+  // popup rather than silently showing tofu. (An automatic body-font swap is not
+  // available: there is no per-codepoint family fallback in the renderer.)
+  {
+    const auto fit = renderer.getFontMap().find(fontId);
+    if (fit != renderer.getFontMap().end()) {
+      size_t cjk = 0, missing = 0;
+      for (uint32_t cp : cps) {
+        if (cp < 0x3400 || cp > 0x9FFF) continue;  // CJK Unified + Ext A
+        ++cjk;
+        if (!fit->second.hasCodepoint(cp, EpdFontFamily::REGULAR)) ++missing;
+      }
+      if (cjk >= 20 && missing * 5 > cjk) {  // >20% of CJK uncovered
+        pushFontMissingNotified_ = true;
+        LOG_ERR("ERS", "PUSH font coverage low: %u/%u CJK missing", (unsigned)missing, (unsigned)cjk);
+      }
+    }
+  }
+  const uint32_t t0 = millis();
+  // accumulate=true -> addCoverage(): faults glyphs without evicting nearer ones.
+  fcm->prewarmCache(fontId, uniq.c_str(), 0x0F, /*accumulate=*/true);
+  LOG_INF("ERS", "PUSH glyph prewarm: %u unique cps, %u bytes, %lums",
+          (unsigned)cps.size(), (unsigned)raw.size(), (unsigned long)(millis() - t0));
 }
 
 ChapterPosition EpubReaderActivity::chapterPosition() const {
@@ -2098,6 +2215,12 @@ void EpubReaderActivity::renderBook() {
 
   // Glyphs of a damaged .cpfont draw as blanks; say why, once per loaded font.
   if (SdCardFont::takeCorruptGlyphNotice()) {
+    showFontDamagedMessage = true;
+    fontDamagedMessageTime = millis();
+  }
+  // S3b P1: pushed doc whose CJK glyph coverage is too low — same visible notice.
+  if (pushFontMissingNotified_) {
+    pushFontMissingNotified_ = false;
     showFontDamagedMessage = true;
     fontDamagedMessageTime = millis();
   }

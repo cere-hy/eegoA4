@@ -5,15 +5,18 @@
 
 #include <Arduino.h>
 #include <BlePushGatt.h>
-#include <Epub.h>  // clearCache() — lib-side, usable from a lib (BookCacheUtils.h is src/)
 #include <HalStorage.h>
 #include <Logging.h>
 #include <PushTextFilter.h>
+#include <PushThumb.h>
 #include <push_sink_core.h>
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <functional>
 #include <string>
 
 namespace pushtextsink {
@@ -25,12 +28,21 @@ constexpr const char* kPartPath = "/.readpico/push.part";
 constexpr const char* kBakPath = "/PUSH.txt.bak";
 constexpr const char* kTmpPath = "/PUSH.txt.tmp";
 constexpr const char* kBookPath = "/PUSH.txt";  // cache hash key must match reader's path exactly
+// S3b P0: don't clear the live reader cache at commit time (a reader may be
+// paging through old PUSH content; deleting its section/book cache mid-session
+// can drive the rebuild path into a corrupt-metadata abort). Instead drop a
+// sticky "dirty" marker OUTSIDE the cache dir; the reader consumes it on next
+// open. Keep this literal in sync with EpubReaderActivity.cpp.
+constexpr const char* kDirtyPath = "/.crosspoint/push_dirty";
 
 // The one session core. Static storage — no heap. Touched ONLY on the NimBLE
 // host task from the CTRL/DATA callbacks below (serialized on that task).
 push_sink_core_t g_core;
 bool g_ready = false;
 uint16_t g_token = 0;
+// S3b P3: one-shot completion flag, written on the host task after a successful
+// commit, consumed by the main loop (takePushCompleted) to decide auto-open.
+std::atomic<bool> g_pushCompleted{false};
 
 // .part streaming handle (HalFile, host task only). Opened with O_WRONLY|O_CREAT
 // (no truncate) and seeked to end, so fresh BEGIN (file removed first) starts at
@@ -196,13 +208,72 @@ static bool commitDocument(const std::string& cleaned) {
     return false;
   }
   if (hadBak) Storage.remove(kBakPath);  // 4) clear .bak
-  // Fresh open → page 1, fresh layout. Cache key = hash(filepath) fixed to
-  // kBookPath, identical to the reader's; Epub::clearCache drops the whole dir.
-  {
-    Epub epub(kBookPath, "/.crosspoint");
-    epub.clearCache();
+  // S3b P0: do NOT clearCache() here. A reader may still be paging through the
+  // old PUSH content (its sections/book.bin are the cache we'd delete); deleting
+  // it mid-session drove the rebuild path into a corrupt-metadata abort. Instead
+  // drop a sticky marker outside the cache dir; the reader consumes it on next
+  // open (clearCache + remove marker) and rebuilds from page 1 there.
+  // Marker write is best-effort: if it fails, content is already committed.
+  if (!Storage.exists(kDirtyPath)) {
+    HalFile d;
+    if (Storage.openFileForWrite("PUSH", kDirtyPath, d)) {
+      d.write(reinterpret_cast<const uint8_t*>("dirty"), 5);
+      d.flush();
+      logf("dirty marker written");
+    } else {
+      logf("dirty marker FAIL (cache will not be invalidated)");
+    }
   }
   return true;
+}
+
+// ---- S3b P4: cover thumbnail ------------------------------------------------
+// BMP sink: writes into the HalFile pointed to by ctx.
+static size_t thumbSink(void* ctx, const uint8_t* data, size_t len) {
+  auto* f = static_cast<HalFile*>(ctx);
+  return f ? f->write(data, len) : 0;
+}
+
+/// Generate <cachePath>/thumb_400.bmp (same path/format the shelf reads).
+/// Best effort: any failure degrades to "no cover"; never affects the push.
+static void generatePushThumb(size_t byteCount) {
+  const std::string cacheDir = std::string("/.crosspoint/epub_") +
+                               std::to_string(std::hash<std::string>{}(kBookPath));
+  const std::string thumbPath = cacheDir + "/thumb_400.bmp";
+  if (!Storage.ensureDirectoryExists("/.crosspoint") || !Storage.ensureDirectoryExists(cacheDir.c_str())) {
+    logf("thumb FAIL: mkdir");
+    return;
+  }
+  // Format push time as YYYY-MM-DD HH:MM (system clock synced by APK SET_TIME).
+  char timeText[32] = {0};
+  std::time_t now = std::time(nullptr);
+  struct tm lt {};
+  if (localtime_r(&now, &lt) == nullptr) {
+    std::snprintf(timeText, sizeof(timeText), "0000-00-00 00:00");
+  } else {
+    std::snprintf(timeText, sizeof(timeText), "%04d-%02d-%02d %02d:%02d",
+                  lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min);
+  }
+  pushthumb::CoverInfo info{timeText, byteCount};
+
+  // Remove any stale thumb first (generateThumbBmp's "exists -> skip" would
+  // otherwise keep the old cover); write via a fresh handle, then close before
+  // anything else touches the file.
+  Storage.remove(thumbPath.c_str());
+  HalFile f;
+  if (!Storage.openFileForWrite("PUSH", thumbPath, f)) {
+    logf("thumb FAIL: open %s", thumbPath.c_str());
+    return;
+  }
+  const bool ok = pushthumb::writeCoverBmp(&thumbSink, &f, info);
+  f.flush();
+  f.close();
+  if (!ok) {
+    Storage.remove(thumbPath.c_str());
+    logf("thumb FAIL: render");
+  } else {
+    logf("thumb ok bytes=%u", (unsigned)byteCount);
+  }
 }
 
 /// Drive the core to CONNECTED from whatever state it is in.
@@ -291,6 +362,8 @@ void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
       if (cleanPart(cleaned) && commitDocument(cleaned)) {
         logf("COMMIT ok bytes=%u ms=%u", (unsigned)cleaned.size(), (unsigned)(millis() - t0));
         Storage.remove(kPartPath);  // fully consumed — safe to drop
+        generatePushThumb(cleaned.size());  // S3b P4: best-effort cover; failure is silent
+        g_pushCompleted.store(true, std::memory_order_release);  // S3b P3: let main loop auto-open
       } else {
         // Keep .part so a retry can rebuild the document without a re-push.
         logf("COMMIT FAIL — original PUSH.txt preserved, .part kept for retry");
@@ -349,12 +422,17 @@ void init() {
        (unsigned)g_token, (int)g_core.sess.state);
 }
 
+bool takePushCompleted() {
+  return g_pushCompleted.exchange(false, std::memory_order_acq_rel);
+}
+
 }  // namespace pushtextsink
 
 #else  // non-EEGO-A4: inert stubs
 
 namespace pushtextsink {
 void init() {}
+bool takePushCompleted() { return false; }
 }  // namespace pushtextsink
 
 #endif
