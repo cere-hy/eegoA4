@@ -15,6 +15,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <TtfEpdFont.h>  // S3c+ [EHP-PROF] epdFontProfileDump()
 #include <Memory.h>
 #include <PushEmbeddedFont.h>
 #include <TrustedTime.h>
@@ -2505,6 +2506,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       LOG_DBG("ERS", "Page render: prewarm=%lums bw_render=%lums display=%lums total=%lums", tPrewarm - t0,
               tBwRender - tPrewarm, tDisplay - tBwRender, tEnd - t0);
     }
+    // S3c+ [EHP-PROF] report glyph rasterization cost separately from render.
+    // Dumps+resets the cumulative counter accrued since the previous page.
+    epdFontProfileDump("render");
   }
 }
 

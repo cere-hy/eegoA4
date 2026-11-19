@@ -17,6 +17,24 @@
 
 namespace {
 
+// S3c+ [EHP-PROF] cumulative glyph-rasterization profile. All state is
+// file-static and touched only on the single render task (RenderLock serializes
+// layout + render), so plain counters suffice — no allocation, no atomics in
+// the hot path. millis() is 1ms-resolution, enough for a per-page total.
+#if defined(ESP_PLATFORM)
+namespace glyphprof {
+uint32_t calls = 0;
+uint32_t ms = 0;
+inline uint32_t now() { return millis(); }
+inline void begin() { /* timestamp captured by caller */ }
+inline void add(const uint32_t t0) {
+  ++calls;
+  const uint32_t dt = now() - t0;
+  ms += dt;  // includes wraparound-safe unsigned subtraction
+}
+}  // namespace glyphprof
+#endif
+
 // S3c-final P0#3 guard: an advance-table buffer must live in WRITABLE RAM.
 // Flash DROM is cache-mapped into the same 0x3Cxx.... window as PSRAM, so a
 // raw address-range test cannot tell them apart — use the ESP memory utils.
@@ -468,7 +486,13 @@ const EpdGlyph* TtfEpdFont::faultGlyph(Face& f, const uint32_t cp, const bool al
   const uint32_t size26_6 = f.owner->size26_6_;
   freeink::font::FtFont::GlyphMetrics gm;
   const bool haveMetrics = f.ft->metricsGlyph26_6(gid, size26_6, gm);
+#if defined(ESP_PLATFORM)
+  const uint32_t profT0 = glyphprof::now();
+#endif
   const freeink::font::GlyphBitmap* g = f.ft->rasterizeGlyph26_6(gid, size26_6);
+#if defined(ESP_PLATFORM)
+  glyphprof::add(profT0);
+#endif
   uint32_t px = (g && g->pixels) ? static_cast<uint32_t>(g->width) * g->height : 0;
   size_t bytes = px ? (f.twoBit ? (px + 3) / 4 : (px + 7) / 8) : 0;
   if (bytes > f.cap) {
@@ -804,6 +828,25 @@ const EpdGlyph* TtfEpdFont::injectGlyph(const uint8_t style, const uint32_t cp, 
   f.slot.insert(f.slot.begin() + pos, newIdx);
   return &f.glyphs[newIdx];
 }
+// S3c+ global bitmap-font fallback bridge: fault through the regular face,
+// including its secondary (PIF1/SD) chain, and return the arena EpdGlyph.
+const EpdGlyph* TtfEpdFont::glyphForGlobal(const uint32_t cp) {
+  if (!loaded_) return nullptr;
+  Face& f = faces_[0];
+  const EpdGlyph* g = faultGlyph(f, cp);
+  if (g != nullptr || secondary_ == nullptr) return g;
+  // cmap miss — mirror missThunk(): let the secondary source rasterize into
+  // this same arena, then re-resolve. Lifetime matches glyphMissHandler's
+  // "valid until next fault/flush" contract, so the global font must consume
+  // it (measure or draw) before requesting another missed glyph.
+  secondary_(secondaryCtx_, cp, 0, *this);
+  return findGlyph(f, cp);
+}
+
+const uint8_t* TtfEpdFont::bitmapForGlobal(const EpdGlyph* glyph) {
+  return bitmapThunk(&faces_[0], glyph);
+}
+
 int8_t TtfEpdFont::kernThunk(void* ctx, const uint32_t leftCp, const uint32_t rightCp) {
   Face* f = static_cast<Face*>(ctx);
   return f->owner->faultKern(*f, leftCp, rightCp);
@@ -869,6 +912,17 @@ bool TtfEpdFont::addCoverage(const char* utf8, const uint8_t style) {
     if (f.flushed || f.miniMetadataOnly || f.faultFailed) return false;
   }
   return true;
+}
+
+void epdFontProfileDump(const char* tag) {
+#if defined(ESP_PLATFORM)
+  // [EHP-PROF] ASCII line: rasterize cost separated from parse/layout.
+  LOG_INF("EHP-PROF", "%s rasterize calls=%u total_ms=%u", tag ? tag : "-", glyphprof::calls, glyphprof::ms);
+  glyphprof::calls = 0;
+  glyphprof::ms = 0;
+#else
+  (void)tag;
+#endif
 }
 
 #endif  // CROSSPOINT_VECTOR_FONTS

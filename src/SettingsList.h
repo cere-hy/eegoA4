@@ -33,6 +33,7 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
     const auto& families = registry->getFamilies();
     allStringValues.reserve(CrossPointSettings::BUILTIN_FONT_COUNT + families.size());
     allStringValues.push_back(I18N.get(StrId::STR_NOTO_SANS));
+    allStringValues.push_back(I18N.get(StrId::STR_BUILTIN_FAST));
     std::transform(families.begin(), families.end(), std::back_inserter(allStringValues),
                    [](const SdCardFontFamilyInfo& f) { return f.name; });
   }
@@ -40,7 +41,7 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
   SettingInfo s;
   s.nameId = StrId::STR_FONT_FAMILY;
   s.type = SettingType::ENUM;
-  s.enumValues = {StrId::STR_NOTO_SANS};
+  s.enumValues = {StrId::STR_NOTO_SANS, StrId::STR_BUILTIN_FAST};
   s.enumStringValues = std::move(allStringValues);
   s.key = "fontFamily";
   s.category = StrId::STR_CAT_READER;
@@ -49,6 +50,11 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
   // The lambdas read the registry instead of copying the names: it is only
   // rescanned while no list built from it is in use, so the indexes match.
   s.valueGetter = [registry]() -> uint8_t {
+    // S3c+裁定: FAST decided by fontFamily, independent of the retained
+    // sdFontFamilyName fallback hint — show FAST, not the retained SD name.
+    if (SETTINGS.fontFamily == CrossPointSettings::BUILTIN_FAST) {
+      return CrossPointSettings::BUILTIN_FAST;
+    }
     // If an SD card font is selected, find its index
     if (registry && SETTINGS.sdFontFamilyName[0] != '\0') {
       const auto& families = registry->getFamilies();
@@ -65,7 +71,8 @@ inline SettingInfo buildFontFamilySetting(const SdCardFontRegistry* registry) {
   s.valueSetter = [registry](uint8_t v) {
     if (v < CrossPointSettings::BUILTIN_FONT_COUNT) {
       SETTINGS.fontFamily = v;
-      SETTINGS.sdFontFamilyName[0] = '\0';
+      // FAST keeps sdFontFamilyName (tier③ hint); Noto Sans clears it.
+      if (v != CrossPointSettings::BUILTIN_FAST) SETTINGS.sdFontFamilyName[0] = '\0';
     } else if (registry) {
       const size_t sdIdx = v - CrossPointSettings::BUILTIN_FONT_COUNT;
       const auto& families = registry->getFamilies();

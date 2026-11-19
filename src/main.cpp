@@ -20,6 +20,7 @@
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <PushEmbeddedFont.h>  // S3c+ global字级 fallback install
 #include <SPI.h>
 #include <TrustedTime.h>
 #include <VectorFontSupport.h>
@@ -75,29 +76,43 @@ FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts
 static unsigned long allowSleepAt = 0;
 
 // Fonts
-EpdFont notosans14RegularFont(&notosans_14_regular);
-EpdFont notosans14BoldFont(&notosans_14_bold);
-EpdFont notosans14ItalicFont(&notosans_14_italic);
-EpdFont notosans14BoldItalicFont(&notosans_14_bolditalic);
+// S3c+: the built-in Noto Sans fonts use MUTABLE EpdFontData copies so their
+// glyphMissHandler/vectorBitmapHandler can be wired to the embedded PUSH/FAST
+// face (字级 fallback: current font -> builtin.ttf -> PIF1 -> SD -> placeholder).
+// All baked metrics/kerning/interval tables are copied byte-for-byte; only the
+// miss path is added. installGlobalFallback() is called after the embedded face
+// is built in setup(), but the handlers use a stable holder so wiring is once.
+static EpdFontData g_noto14reg(notosans_14_regular), g_noto14bold(notosans_14_bold),
+    g_noto14italic(notosans_14_italic), g_noto14bi(notosans_14_bolditalic);
+EpdFont notosans14RegularFont(&g_noto14reg);
+EpdFont notosans14BoldFont(&g_noto14bold);
+EpdFont notosans14ItalicFont(&g_noto14italic);
+EpdFont notosans14BoldItalicFont(&g_noto14bi);
 EpdFontFamily notosans14FontFamily(14, &notosans14RegularFont, &notosans14BoldFont, &notosans14ItalicFont,
                                    &notosans14BoldItalicFont);
 #ifndef OMIT_FONTS
-EpdFont notosans12RegularFont(&notosans_12_regular);
-EpdFont notosans12BoldFont(&notosans_12_bold);
-EpdFont notosans12ItalicFont(&notosans_12_italic);
-EpdFont notosans12BoldItalicFont(&notosans_12_bolditalic);
+static EpdFontData g_noto12reg(notosans_12_regular), g_noto12bold(notosans_12_bold),
+    g_noto12italic(notosans_12_italic), g_noto12bi(notosans_12_bolditalic);
+EpdFont notosans12RegularFont(&g_noto12reg);
+EpdFont notosans12BoldFont(&g_noto12bold);
+EpdFont notosans12ItalicFont(&g_noto12italic);
+EpdFont notosans12BoldItalicFont(&g_noto12bi);
 EpdFontFamily notosans12FontFamily(12, &notosans12RegularFont, &notosans12BoldFont, &notosans12ItalicFont,
                                    &notosans12BoldItalicFont);
-EpdFont notosans16RegularFont(&notosans_16_regular);
-EpdFont notosans16BoldFont(&notosans_16_bold);
-EpdFont notosans16ItalicFont(&notosans_16_italic);
-EpdFont notosans16BoldItalicFont(&notosans_16_bolditalic);
+static EpdFontData g_noto16reg(notosans_16_regular), g_noto16bold(notosans_16_bold),
+    g_noto16italic(notosans_16_italic), g_noto16bi(notosans_16_bolditalic);
+EpdFont notosans16RegularFont(&g_noto16reg);
+EpdFont notosans16BoldFont(&g_noto16bold);
+EpdFont notosans16ItalicFont(&g_noto16italic);
+EpdFont notosans16BoldItalicFont(&g_noto16bi);
 EpdFontFamily notosans16FontFamily(16, &notosans16RegularFont, &notosans16BoldFont, &notosans16ItalicFont,
                                    &notosans16BoldItalicFont);
-EpdFont notosans18RegularFont(&notosans_18_regular);
-EpdFont notosans18BoldFont(&notosans_18_bold);
-EpdFont notosans18ItalicFont(&notosans_18_italic);
-EpdFont notosans18BoldItalicFont(&notosans_18_bolditalic);
+static EpdFontData g_noto18reg(notosans_18_regular), g_noto18bold(notosans_18_bold),
+    g_noto18italic(notosans_18_italic), g_noto18bi(notosans_18_bolditalic);
+EpdFont notosans18RegularFont(&g_noto18reg);
+EpdFont notosans18BoldFont(&g_noto18bold);
+EpdFont notosans18ItalicFont(&g_noto18italic);
+EpdFont notosans18BoldItalicFont(&g_noto18bi);
 EpdFontFamily notosans18FontFamily(18, &notosans18RegularFont, &notosans18BoldFont, &notosans18ItalicFont,
                                    &notosans18BoldItalicFont);
 
@@ -556,6 +571,29 @@ void setupDisplayAndFonts(bool seamless = false) {
 
   // Discover and load SD card fonts
   sdFontSystem.begin(renderer);
+
+  // S3c+: wire the built-in Noto Sans faces' glyph-miss path to the embedded
+  // PUSH/FAST face, so a global "English font" renders CJK per glyph via the
+  // four-tier chain (builtin.ttf -> PIF1 -> SD -> placeholder). Handlers use a
+  // stable holder updated by ensurePushFont(), so no re-wiring on size change.
+  pushembedfont::installGlobalFallback(g_noto14reg);
+  pushembedfont::installGlobalFallback(g_noto14bold);
+  pushembedfont::installGlobalFallback(g_noto14italic);
+  pushembedfont::installGlobalFallback(g_noto14bi);
+#ifndef OMIT_FONTS
+  pushembedfont::installGlobalFallback(g_noto12reg);
+  pushembedfont::installGlobalFallback(g_noto12bold);
+  pushembedfont::installGlobalFallback(g_noto12italic);
+  pushembedfont::installGlobalFallback(g_noto12bi);
+  pushembedfont::installGlobalFallback(g_noto16reg);
+  pushembedfont::installGlobalFallback(g_noto16bold);
+  pushembedfont::installGlobalFallback(g_noto16italic);
+  pushembedfont::installGlobalFallback(g_noto16bi);
+  pushembedfont::installGlobalFallback(g_noto18reg);
+  pushembedfont::installGlobalFallback(g_noto18bold);
+  pushembedfont::installGlobalFallback(g_noto18italic);
+  pushembedfont::installGlobalFallback(g_noto18bi);
+#endif  // OMIT_FONTS
 
   LOG_DBG("MAIN", "Fonts setup");
 }

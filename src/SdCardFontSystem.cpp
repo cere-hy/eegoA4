@@ -74,13 +74,16 @@ constexpr UiFontSize kUiFontSizes[] = {
 
 int SdCardFontSystem::ensurePushFont(GfxRenderer& renderer) {
 #if CROSSPOINT_VECTOR_FONTS
-  pushembedfont::setSdFallback(ttf_.get());  // tier ③ uses the active SD vector font, if any
+  // S3c+ tier③ points at the active SD (LXGW) face, PER-FACE via pushFallback_.
+  // PUSH and FAST share this face + this ctx, so neither can clobber the other.
+  pushembedfont::setSdFallback(pushFallback_, ttf_.get());
   const uint8_t pt = SETTINGS.fontPointSize;
   if (pushTtf_ && pushPt_ == pt && pushFontId_ != 0) return pushFontId_;
 
   if (pushTtf_) {
     renderer.unregisterTtfFont(pushFontId_);
     renderer.removeFont(pushFontId_);
+    pushembedfont::setEmbeddedFace(nullptr);  // S3c+: drop global fallback ref before free
     pushTtf_.reset();
     pushFontId_ = 0;
   }
@@ -100,7 +103,7 @@ int SdCardFontSystem::ensurePushFont(GfxRenderer& renderer) {
     return 0;
   }
   f->build(" ");
-  pushembedfont::installInto(*f);  // install PIF1 + SD + placeholder secondary
+  pushembedfont::installInto(*f, pushFallback_);  // install PIF1 + SD + placeholder secondary
   const int id = computeTtfFontId("\x01push_embedded", pt);
   renderer.insertFont(id, f->family());
   renderer.registerTtfFont(id, f.get());
@@ -109,6 +112,10 @@ int SdCardFontSystem::ensurePushFont(GfxRenderer& renderer) {
   pushTtf_ = std::move(f);
   pushFontId_ = id;
   pushPt_ = pt;
+  // S3c+ global fallback: point the stable holder at the live embedded face so
+  // built-in Noto Sans can serve CJK misses from tiers ①-③. Updated on every
+  // point-size rebuild; cleared on teardown below.
+  pushembedfont::setEmbeddedFace(pushTtf_.get());
   LOG_INF("SDFS", "PUSH embedded font ready @%upt (id %d, cache %u KB)", pt, id, (unsigned)(cacheBytes / 1024));
   return id;
 #else
@@ -146,6 +153,14 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
     return static_cast<SdCardFontSystem*>(ctx)->resolveFontId(familyName, pointSize);
   };
   SETTINGS.sdFontResolverCtx = this;
+
+  // S3c+: Built-in (Fast) resolves to the shared PUSH/embedded face id. The
+  // face is prepared at the end of begin(); until then fastFontId() is 0 and
+  // getReaderFontId() falls through harmlessly.
+  SETTINGS.fastFontIdResolver = [](void* ctx) -> int {
+    return static_cast<SdCardFontSystem*>(ctx)->fastFontId();
+  };
+  SETTINGS.fastFontResolverCtx = this;
 
   // If user has a saved SD font selection, load it
   if (SETTINGS.sdFontFamilyName[0] != '\0') {
@@ -515,7 +530,10 @@ void SdCardFontSystem::unloadTtf(GfxRenderer& renderer) {
     renderer.removeFont(ttfFontId_);  // drop from the renderer's fontMap
   }
   ttf_.reset();  // frees the FT faces first (they read ttfSources_)
-  pushembedfont::setSdFallback(nullptr);  // S3c: clear PUSH tier-③ pointer before it dangles
+  // S3c+ clear the per-face tier③ pointer before LXGW's face dangles. PUSH/FAST
+  // then gracefully degrade to tier④ placeholder (no crash) until a new SD
+  // face is loaded. See裁定必答4.
+  pushembedfont::setSdFallback(pushFallback_, nullptr);
   freeTtfSources();
   ttfFamily_.clear();
   ttfFontId_ = 0;
@@ -724,6 +742,10 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
   renderer.registerTtfFont(ttfFontId_, ttf_.get());
   ttfFamily_ = family.name;
   ttfPointSize_ = size;
+  // S3c+: keep PUSH/FAST tier③ pointing at the freshly (re)loaded SD face.
+  // This also re-arms tier③ after a delete-then-reinstall or a point-size
+  // change, so生僻字 keep resolving via SD and never degrade permanently.
+  pushembedfont::setSdFallback(pushFallback_, ttf_.get());
   LOG_DBG("SDFS", "Reader TTF face loaded (heap free %u, max block %u)", (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap());
   setupTtfUiFallbacks(renderer);  // CJK/script UI fallback at the built-in UI sizes

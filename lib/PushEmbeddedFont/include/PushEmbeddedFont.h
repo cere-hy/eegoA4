@@ -8,11 +8,20 @@
 // All injected glyphs land in the SAME TtfEpdFont face arena, so the existing
 // vectorBitmapHandler draw path serves them unchanged and layout is per-glyph.
 //
-// Only installed on the PUSH dedicated font. Other books/fonts are untouched.
+// S3c+ — the embedded font face is ALSO the "Built-in (Fast)" reader face:
+// the FAST reader id maps to the SAME resident TtfEpdFont as PUSH, so PUSH and
+// FAST share ONE handler context (no duplicate registration, no cross-over).
+// The secondary/advance handlers are now ctx-driven (`FallbackContext`) so the
+// tier-③ pointer is per-face, never a process-global that one face can clobber.
+//
+// The same fallback chain is also offered to GLOBAL bitmap fonts (built-in
+// Noto Sans, SD .cpfont) via a plain glyph-miss callback installed in their
+// EpdFontData — see `installGlobalFallback()`.
 #include <cstddef>
 #include <cstdint>
 
 class TtfEpdFont;
+#include <EpdFontData.h>  // EpdFontData is an anonymous-struct typedef; include it
 
 namespace pushembedfont {
 
@@ -26,22 +35,47 @@ extern const uint8_t uihanzi_bin_end[] asm("_binary_assets_fonts_ui_hanzi_bin_en
 inline size_t builtinTtfLen() { return size_t(builtin_ttf_end - builtin_ttf_start); }
 inline const uint8_t* builtinTtfData() { return builtin_ttf_start; }
 
-// Set the SD fallback font used for tier ③. `font` must outlive the PUSH font.
-// Pass nullptr to disable tier ③.
-void setSdFallback(TtfEpdFont* font);
-
-// Install the secondary handler into a PUSH TtfEpdFont (call after load()).
-void installInto(TtfEpdFont& pushFont);
-
-// True once when tier ④ had to placeholder a large share of CJK (ASCII notice).
-bool takePushFontUnavailable();
-
 // Diagnostics counters (reset on each install).
 struct Stats {
   uint32_t pif1Hits;
   uint32_t sdHits;
   uint32_t misses;
 };
+
+// Per-face fallback state. Lives as long as the face it is installed into; the
+// secondary/advance handlers receive it through their `void* ctx` argument.
+// S3c+ engineering rule: tier-③ is per-face so PUSH/FAST and any other face
+// cannot overwrite each other's SD fallback pointer.
+struct FallbackContext {
+  TtfEpdFont* sdFont = nullptr;  // tier ③ (LXGW). nullptr disables tier ③.
+  Stats stats{};                 // diagnostics (per-face)
+  uint32_t cjkSeen = 0;
+  uint32_t cjkMissing = 0;
+  void* unavailable = nullptr;   // std::atomic<bool>* when provided
+};
+
+// Set the SD fallback font (tier ③) for a context. `font` must outlive every
+// face whose handler carries this ctx. Pass nullptr to disable tier ③ (used on
+// teardown and when the user deleted the SD font file).
+void setSdFallback(FallbackContext& ctx, TtfEpdFont* font);
+
+// Install the secondary/advance handlers into an embedded TtfEpdFont (call
+// after load()). `ctx` must outlive `pushFont`. Idempotent.
+void installInto(TtfEpdFont& pushFont, FallbackContext& ctx);
+
+// S3c+ global bitmap-font字级回退: wire a global (built-in Noto Sans) font's
+// EpdFontData so a missing codepoint is served per-glyph from tiers ①-③ of the
+// embedded PUSH/FAST face. `data` must be a MUTABLE copy the caller owns. The
+// handlers use a stable holder updated by setEmbeddedFace(), so point-size
+// rebuilds of the embedded face need no re-wiring.
+void installGlobalFallback(EpdFontData& data);
+// Point the global fallback holder at the current embedded face (call after
+// ensurePushFont builds/rebuilds it; pass nullptr on teardown).
+void setEmbeddedFace(TtfEpdFont* face);
+
+// True once when tier ④ had to placeholder a large share of CJK (ASCII notice).
+bool takePushFontUnavailable();
+
 Stats stats();
 
 }  // namespace pushembedfont

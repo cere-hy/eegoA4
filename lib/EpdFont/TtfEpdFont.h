@@ -143,6 +143,15 @@ class TtfEpdFont {
   const uint8_t* rasterizedBitmap(uint32_t cp, uint8_t& w, uint8_t& h, uint16_t& bytes, int32_t& adv12_4,
                                   int16_t& left, int16_t& top, uint8_t style = 0);
 
+  // S3c+ global bitmap-font fallback bridge. `glyphForGlobal()` faults `cp`
+  // through this face (primary + its secondary chain) and returns the EpdGlyph
+  // in this face's arena (regular style), valid until the next fault/flush on
+  // this face — exactly the EpdFontData::glyphMissHandler lifetime contract.
+  // `bitmapForGlobal()` resolves that EpdGlyph back to its packed bitmap via
+  // bitmapThunk, for the paired vectorBitmapHandler. Returns nullptr on miss.
+  const EpdGlyph* glyphForGlobal(uint32_t cp);
+  const uint8_t* bitmapForGlobal(const EpdGlyph* glyph);
+
  private:
   // A borrowed source file (one per style role that the caller supplies).
   struct Source {
@@ -264,5 +273,12 @@ class TtfEpdFont {
   AdvanceHandler advanceHandler_ = nullptr;
   void* advanceCtx_ = nullptr;
 };
+
+// S3c+ [EHP-PROF] — lightweight cumulative glyph-rasterization profiler. Counts
+// every FreeType rasterizeGlyph26_6() call and its wall time so the reader can
+// report rasterize cost separately from HTML parse / page layout. Call
+// epdFontProfileDump() at a page/section boundary; it logs one ASCII line and
+// resets the counters. No-op (still linkable) on host builds.
+void epdFontProfileDump(const char* tag);
 
 #endif  // CROSSPOINT_VECTOR_FONTS

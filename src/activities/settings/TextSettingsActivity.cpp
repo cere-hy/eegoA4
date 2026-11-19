@@ -32,6 +32,12 @@ constexpr StrId STYLE_ROW_NAME_IDS[] = {StrId::STR_FOCUS_READING, StrId::STR_HYP
                                         StrId::STR_EMBEDDED_STYLE_NO_PREVIEW, StrId::STR_TEXT_AA_NO_PREVIEW};
 
 int findCurrentFontIndex(const SdCardFontRegistry* registry, const char* sdFontFamilyName, uint8_t fontFamily) {
+  // S3c+裁定: FAST is decided by fontFamily, independently of sdFontFamilyName
+  // (retained as tier③ fallback hint). Show FAST in the UI even though an SD
+  // name is retained — no two-places disagreement.
+  if (fontFamily == CrossPointSettings::BUILTIN_FAST) {
+    return CrossPointSettings::BUILTIN_FAST;
+  }
   if (sdFontFamilyName[0] != '\0' && registry) {
     const auto& families = registry->getFamilies();
     const auto family = std::find_if(families.begin(), families.end(), [sdFontFamilyName](const auto& candidate) {
@@ -82,6 +88,7 @@ void TextSettingsActivity::onEnter() {
   fonts_.clear();
   fonts_.reserve(CrossPointSettings::BUILTIN_FONT_COUNT + (registry_ ? registry_->getFamilyCount() : 0));
   fonts_.push_back({I18N.get(StrId::STR_NOTO_SANS), true, static_cast<uint8_t>(CrossPointSettings::NOTOSANS)});
+  fonts_.push_back({I18N.get(StrId::STR_BUILTIN_FAST), true, static_cast<uint8_t>(CrossPointSettings::BUILTIN_FAST)});
   if (registry_) {
     const auto& families = registry_->getFamilies();
     for (int i = 0; i < static_cast<int>(families.size()); i++) {
@@ -315,8 +322,12 @@ void TextSettingsActivity::applyFamily(int listIndex) {
   const auto& font = fonts_[listIndex];
   if (font.isBuiltin) {
     SETTINGS.fontFamily = font.settingIndex;
-    SETTINGS.sdFontFamilyName[0] = '\0';
-    sdFontSystem.ensureLoaded(renderer);  // unloads the previously resident SD font
+    // S3c+裁定: Built-in (Fast) KEEPS sdFontFamilyName as the tier③ SD fallback
+    // hint (do not unload LXGW). Only plain Noto Sans clears it.
+    if (font.settingIndex != CrossPointSettings::BUILTIN_FAST) {
+      SETTINGS.sdFontFamilyName[0] = '\0';
+    }
+    sdFontSystem.ensureLoaded(renderer);  // FAST: keeps LXGW loaded; Noto: unloads SD
     currentFamilyIndex_ = listIndex;
   } else if (registry_) {
     const int sdIdx = font.settingIndex - CrossPointSettings::BUILTIN_FONT_COUNT;

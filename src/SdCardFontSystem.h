@@ -2,6 +2,7 @@
 
 #include <Epub/blocks/TextBlock.h>
 #include <HalStorage.h>  // HalFile (kept open for streamed TTFs)
+#include <PushEmbeddedFont.h>  // S3c+ FallbackContext (per-face tier③ pointer)
 #include <SdCardFontManager.h>
 #include <SdCardFontRegistry.h>
 #include <VectorFontSupport.h>
@@ -49,6 +50,11 @@ class SdCardFontSystem {
   int ensurePushFont(GfxRenderer& renderer);
   /// Renderer font id of the loaded PUSH font (0 = not loaded yet).
   int pushFontId() const { return pushFontId_; }
+
+  /// S3c+: Built-in (Fast) reuses the SAME resident embedded face as PUSH, so
+  /// there is one handler chain and no second face. The fast id equals the push
+  /// id; kept as a separate accessor for intent clarity at call sites.
+  int fastFontId() const { return pushFontId_; }
 
   /// Access the registry (e.g. for settings UI to enumerate available fonts).
   const SdCardFontRegistry& registry() const { return registry_; }
@@ -151,9 +157,13 @@ class SdCardFontSystem {
 
   // S3c PUSH embedded font: resident builtin.ttf (embed bytes, no SD), with
   // PIF1 Han bitmap + SD fallback installed as its secondary glyph source.
+  // S3c+: this SAME face is the Built-in (Fast) reader font.
   std::unique_ptr<TtfEpdFont> pushTtf_;
   int pushFontId_ = 0;
   uint8_t pushPt_ = 0;
+  // S3c+ per-face fallback state: tier③ points at the active SD (LXGW) face.
+  // Lives as long as this system, so handler ctx never dangles before unload.
+  pushembedfont::FallbackContext pushFallback_;
 
   // Reader-font faces at other sizes (share ttfSources_).
   struct TtfVariant {

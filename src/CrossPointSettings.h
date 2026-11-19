@@ -110,11 +110,15 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   };
 
   // Font family options (built-in fonts only; SD card fonts use sdFontFamilyName)
-  enum FONT_FAMILY { NOTOSANS = 0, FONT_FAMILY_COUNT };
+  // S3c+: BUILTIN_FAST selects the embedded builtin.ttf face (shared with PUSH)
+  // for zero-SD-seek CJK reading. sdFontFamilyName, when present, is retained as
+  // the tier③ SD fallback hint (see裁定第2项) and is NOT cleared on this choice.
+  enum FONT_FAMILY { NOTOSANS = 0, BUILTIN_FAST = 1, FONT_FAMILY_COUNT };
   static constexpr uint8_t LEGACY_NOTOSERIF = 0;
   // Persisted IDs stay stable even though the built-in menu now starts at zero.
   static constexpr uint8_t STORED_NOTOSANS = 1;
   static constexpr uint8_t LEGACY_OPENDYSLEXIC = 2;
+  static constexpr uint8_t STORED_BUILTIN_FAST = 3;  // new; distinct from legacy 0/2
   static constexpr uint8_t BUILTIN_FONT_COUNT = FONT_FAMILY_COUNT;
   // Reader font size is a point size, not an enum slot — see fontPointSize.
   // Legacy 1.4-and-earlier files stored a 0..3 SMALL/MEDIUM/LARGE/EXTRA_LARGE
@@ -451,6 +455,15 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   using SdFontIdResolver = int (*)(void* ctx, const char* familyName, uint8_t fontSize);
   SdFontIdResolver sdFontIdResolver = nullptr;
   void* sdFontResolverCtx = nullptr;
+
+  // S3c+: callback that returns the Built-in (Fast) reader font id (the shared
+  // PUSH/embedded face). Set by SdCardFontSystem::begin(). Returns 0 until the
+  // face is ready, in which case getReaderFontId() falls through to the normal
+  // built-in path. Kept as a trampoline so all getReaderFontId() callers (reader,
+  // dictionary cards, preview, details) resolve FAST identically.
+  using FastFontIdResolver = int (*)(void* ctx);
+  FastFontIdResolver fastFontIdResolver = nullptr;
+  void* fastFontResolverCtx = nullptr;
 
   uint16_t getPowerButtonDuration() const {
     return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : PowerButtonInput::LONG_PRESS_MS;

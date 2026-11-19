@@ -95,7 +95,10 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   doc["frontButtonRight"] = frontButtonRight;
   // Font family and size — both use dynamic getter/setters in SettingsList (the
   // option lists depend on the SD font registry), so the generic loop skips them.
-  doc["fontFamily"] = STORED_NOTOSANS;
+  // S3c+: persist the real built-in choice so Built-in (Fast) survives reboot;
+  // SD families continue to be expressed by sdFontFamilyName written below.
+  doc["fontFamily"] =
+      (fontFamily == BUILTIN_FAST) ? static_cast<uint8_t>(STORED_BUILTIN_FAST) : static_cast<uint8_t>(STORED_NOTOSANS);
   doc["fontSize"] = fontPointSize;
   // S3c-final P0#3 diagnostics switch (hidden from UI). Persist even when true
   // so an explicit false can be cleared again by writing true in settings.json.
@@ -266,8 +269,10 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   if (!doc["advanceOnlyLayout"].isNull()) advanceOnlyLayout = doc["advanceOnlyLayout"] | true;
 
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
-  const uint8_t storedFontFamily = doc["fontFamily"] | STORED_NOTOSANS;
-  fontFamily = NOTOSANS;
+  // S3c+裁定: absent fontFamily defaults to Built-in (Fast) selected, with
+  // sdFontFamilyName empty (handled below) — never a half-selected state.
+  const uint8_t storedFontFamily = doc["fontFamily"] | STORED_BUILTIN_FAST;
+  fontFamily = (storedFontFamily == STORED_BUILTIN_FAST) ? BUILTIN_FAST : NOTOSANS;
   // These controls use board-specific display-index mappings and are skipped by
   // the generic settings loop. Persisted action IDs remain stable across boards.
   longPressMenuFunction = clamp(doc["longPressMenuFunction"] | (uint8_t)LP_MENU_DISABLED,
@@ -403,6 +408,16 @@ void CrossPointSettings::clearSdFontFamily() {
 }
 
 int CrossPointSettings::getReaderFontId() const {
+  // S3c+: Built-in (Fast) selects the shared embedded face. Decided by
+  // fontFamily, INDEPENDENT of sdFontFamilyName (which is retained only as the
+  // tier③ SD fallback hint per裁定第2项). Checked first so a retained
+  // sdFontFamilyName never pulls FAST back onto the SD path.
+  if (fontFamily == BUILTIN_FAST && fastFontIdResolver) {
+    const int id = fastFontIdResolver(fastFontResolverCtx);
+    if (id != 0) return id;
+    // Face not ready yet (early boot) — fall through to built-in below.
+  }
+
   // Check SD card font first
   if (sdFontFamilyName[0] != '\0' && sdFontIdResolver) {
     int id = sdFontIdResolver(sdFontResolverCtx, sdFontFamilyName, fontPointSize);
