@@ -117,8 +117,10 @@ int main(void) {
     if (nseg && cy - segY1[nseg-1] <= 3) segY1[nseg-1] = cy;
     else if (nseg < 8) { segY0[nseg] = segY1[nseg] = cy; ++nseg; }
   }
-  CHECK(nseg == 3, "P2: exactly 3 ink bands (PUSH / time / bytes; no mid duplicate)");
+  CHECK(nseg == 3, "P2: exactly 3 ink bands (PUSH / bytes / time; no mid duplicate)");
   if (nseg == 3) {
+    // Top-down order after 甲方案: [0] PUSH y100..147, [1] bytes y252..265,
+    // [2] time y290..296. All three horizontally centred on x120.
     for (int s = 0; s < nseg; ++s) {
       int bx0 = pushthumb::kThumbWidth, bx1 = -1;
       for (int cy = segY0[s]; cy <= segY1[s]; ++cy)
@@ -129,11 +131,19 @@ int main(void) {
       const int cx2 = bx0 + bx1;  // 2*centre; expect ~240
       CHECK(cx2 >= 232 && cx2 <= 248, "P2: band horizontally centred on 120 (+/-4)");
     }
-    // Large PUSH band ~48px tall, near top (~y100).
+    // Large PUSH band ~48px tall, near top (~y100) — UNCHANGED.
     CHECK((segY1[0] - segY0[0] + 1) >= 40, "P2: large PUSH band ~48px tall (vector raster)");
-    // Time band must be fully inside (not clipped at x=0/239 as the old bug did).
+    CHECK(segY0[0] >= 96 && segY1[0] <= 150, "P2-final: large PUSH stays y100..147");
+    // Byte-count band UNCHANGED at y252..265.
+    CHECK(segY0[1] >= 248 && segY1[1] <= 268, "P2-final: byte-count band stays y252..265");
+    // Time band MOVED below bytes: y290..300 (no longer y200..206 under title box).
+    CHECK(segY0[2] >= 286 && segY0[2] <= 302, "P2-final: time band moved to y290..300");
+    CHECK(segY1[2] <= 320, "P2-final: time band within y320 ceiling (clear of button)");
+    CHECK(segY0[2] - segY1[1] >= 20, "P2-final: time band >=20px below byte-count band");
+    CHECK(segY0[2] > 222, "P2-final: time band clear of theme title box (bottom 222)");
+    // Time band fully inside (not clipped at x=0/239 as the old bug did).
     int tbx0 = pushthumb::kThumbWidth, tbx1 = -1;
-    for (int cy = segY0[1]; cy <= segY1[1]; ++cy)
+    for (int cy = segY0[2]; cy <= segY1[2]; ++cy)
       for (int x = 0; x < pushthumb::kThumbWidth; ++x)
         if (isInk(x, cy)) { if (x < tbx0) tbx0 = x; if (x > tbx1) tbx1 = x; }
     CHECK(tbx0 > 8 && tbx1 < 232, "P2: time line fully visible, no edge clipping");

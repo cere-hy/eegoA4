@@ -108,6 +108,26 @@ class TtfEpdFont {
     secondaryCtx_ = ctx;
   }
 
+  // --- Advance-only query (S3c final: measure must not rasterize) -------------
+  // Layout measurement needs only advanceX, but EpdFont::getGlyphMetrics() faulted
+  // the full glyph (metrics load + rasterize load + render + bitmap packing). On
+  // a long CJK document that is thousands of wasted rasterizations. getAdvance()
+  // returns the SAME 12.4 fixed-point adv faultGlyph would store (so measure and
+  // draw agree exactly) while rasterizing nothing:
+  //   * cached in an ordered per-face advance table -> pure binary lookup;
+  //   * else glyphId + metricsGlyph26_6 (ONE FT_Load_Glyph, no render) -> cache;
+  //   * else (cmap miss) ask the registered AdvanceHandler (PIF1 record[4] /
+  //     SD fallback advance) -> cache.
+  // Draw still goes through the untouched glyph cache + missThunk/faultGlyph, so
+  // no glyph is forced into existence by measuring and none is rasterized twice.
+  // Returns false only when no source can supply an advance (caller falls back).
+  using AdvanceHandler = bool (*)(void* ctx, uint32_t codepoint, uint8_t style, TtfEpdFont& font, uint16_t& adv12_4);
+  void setAdvanceHandler(AdvanceHandler handler, void* ctx) {
+    advanceHandler_ = handler;
+    advanceCtx_ = ctx;
+  }
+  bool getAdvance(uint32_t codepoint, uint8_t style, uint16_t& adv12_4);
+
   // Inject an already-2-bit rasterized glyph into `style`'s arena. `bmp2bit` is
   // byte-packed exactly like EpdFontData (2 bits/px when twoBit, MSB-first;
   // 1 bit/px otherwise), `bytes` its length. Returns the cached EpdGlyph or null
@@ -175,6 +195,14 @@ class TtfEpdFont {
     freeink::font::PsramVector<EpdGlyph> glyphs;
     freeink::font::PsramVector<uint32_t> cps;
     freeink::font::PsramVector<uint16_t> slot;
+    // S3c final advance-only table: {cp, advanceX(12.4)}, sorted by cp. Kept
+    // separate from the rasterized glyph cache so measuring never allocates a
+    // bitmap. Persists across clearCache()/page turns; bounded by kAdvanceCap.
+    struct AdvanceEntry {
+      uint32_t cp;
+      uint16_t adv12_4;
+    };
+    freeink::font::PsramVector<AdvanceEntry> advances;
     // Kern pair cache ((left<<32)|right → 4.4 value), sorted by key. Kerning
     // resolves through FtFont (legacy 'kern' table, then the GPOS 'kern'
     // feature) once per pair, then serves from here — getKerning runs for
@@ -232,6 +260,9 @@ class TtfEpdFont {
   // S3c secondary glyph source (nullptr for every font except PUSH embedded).
   SecondaryHandler secondary_ = nullptr;
   void* secondaryCtx_ = nullptr;
+  // S3c final advance-only source (nullptr for every font except PUSH embedded).
+  AdvanceHandler advanceHandler_ = nullptr;
+  void* advanceCtx_ = nullptr;
 };
 
 #endif  // CROSSPOINT_VECTOR_FONTS

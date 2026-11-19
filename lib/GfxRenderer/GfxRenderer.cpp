@@ -2193,6 +2193,66 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
     return widthPx;
   }
 
+#if CROSSPOINT_VECTOR_FONTS
+  // S3c final — advance-only fast path for TTF reader fonts (PUSH embedded and
+  // any user-selected SD TTF). Mirrors the general path below line-for-line, but
+  // sources each advance via TtfEpdFont::getAdvance(), which NEVER rasterizes.
+  // Layout used to call getGlyphMetrics()->faultGlyph(), paying metrics load +
+  // rasterize load + render + bitmap packing for every first-seen glyph. On a
+  // long CJK document that dominated "Time to parse and build pages". Drawing
+  // is untouched: glyphs still fault into the (unchanged) cache on render, so
+  // measuring never creates a bitmap and never causes a duplicate rasterize.
+  {
+    const auto ttfIt = ttfFonts_.find(resolvedFontId);
+    if (mode == TextMeasureMode::Layout && ttfIt != ttfFonts_.end() && ttfIt->second != nullptr) {
+      const auto fontIt = fontMap.find(resolvedFontId);
+      if (fontIt == fontMap.end()) {
+        LOG_ERR("GFX", "Font %d not found", resolvedFontId);
+        return 0;
+      }
+      const auto& font = fontIt->second;
+      TtfEpdFont* const ttf = ttfIt->second;
+      const bool isSupSub = (style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0;
+      uint8_t styleIdx = 0;
+      if ((style & EpdFontFamily::BOLD) && (style & EpdFontFamily::ITALIC)) styleIdx = 3;
+      else if (style & EpdFontFamily::BOLD) styleIdx = 1;
+      else if (style & EpdFontFamily::ITALIC) styleIdx = 2;
+      int widthPx = 0;
+      int32_t prevAdvanceFP = 0;
+      uint32_t prevCp = 0;
+      while (uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text))) {
+        if (BidiUtils::isTransparentMark(cp) || utf8IsCombiningMark(cp)) continue;
+        const uint32_t smallCapCp = (style & EpdFontFamily::SMALL_CAPS) ? utf8SmallCapsUpper(cp) : cp;
+        const bool isSmallCap = smallCapCp != cp;
+        cp = smallCapCp;
+        if (!(style & EpdFontFamily::SMALL_CAPS)) cp = font.applyLigatures(cp, text, style);
+
+        if (prevCp != 0) {
+          const auto kernFP = font.getKerning(prevCp, cp, style);  // same 4.4 kerning as draw/general path
+          widthPx += fp4::toPixel(prevAdvanceFP + kernFP) + trackingBetween(prevCp, cp, tracking);
+        }
+
+        uint16_t adv12_4 = 0;
+        bool advOk = ttf->getAdvance(cp, styleIdx, adv12_4);
+        if (!advOk || (adv12_4 == 0 && syntheticGlyph::isSolid(cp) && !font.hasCodepoint(cp, style))) {
+          // Fallback (advance table full / uncached source / synthetic solid):
+          // preserve correctness by taking the ordinary path for this glyph.
+          EpdGlyph solidFallback;
+          const EpdGlyph* glyph = font.getGlyphMetrics(cp, solidFallback, style);
+          adv12_4 = glyph ? glyph->advanceX : 0;
+        }
+        int32_t a = adv12_4;
+        if (isSupSub) a = (a + 1) / 2;
+        else if (isSmallCap) a = scaleSmallCapAdvance(a);
+        prevAdvanceFP = a;
+        prevCp = cp;
+      }
+      widthPx += fp4::toPixel(prevAdvanceFP);
+      return widthPx;
+    }
+  }
+#endif  // CROSSPOINT_VECTOR_FONTS
+
   const auto fontIt = fontMap.find(resolvedFontId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", resolvedFontId);

@@ -125,6 +125,24 @@ bool secondary(void* /*ctx*/, uint32_t cp, uint8_t style, TtfEpdFont& font) {
   return false;
 }
 
+// S3c final — advance-only secondary query. Mirrors `secondary()`'s tier order
+// but touches NO bitmap: tier ② reads record[4] directly (no coverage/packing),
+// tier ③ asks the SD TtfEpdFont for its advance. Returns the same 12.4 value the
+// draw-time secondary would inject, so measure/draw advances are identical.
+bool advanceOnly(void* /*ctx*/, uint32_t cp, uint8_t style, TtfEpdFont& font, uint16_t& adv12_4) {
+  // Tier ②: PIF1 Han bitmap — advance straight from record[4].
+  if (g_reader) {
+    const int px = pif1PxFromEmPx(font.family().getSizeInPixels());
+    if (pif1AdvanceOnly(*g_reader, cp, px, adv12_4)) return true;
+  }
+
+  // Tier ③: SD full font (LXGW) — its own advance-only path (no rasterize).
+  if (g_sdFont && g_sdFont->getAdvance(cp, style < 4 ? style : 0, adv12_4)) return true;
+
+  // Tier ④: no source has an advance for this codepoint.
+  return false;
+}
+
 }  // namespace
 
 void setSdFallback(TtfEpdFont* font) { g_sdFont = font; }
@@ -148,7 +166,8 @@ void installInto(TtfEpdFont& pushFont) {
   g_cjkSeen = g_cjkMissing = 0;
   g_unavailable.store(false, std::memory_order_release);
   pushFont.setSecondaryHandler(&secondary, nullptr);
-  LOG_INF("PFNT", "installed: pif1=%d sd=%d binChars=%u", g_reader ? 1 : 0, g_sdFont ? 1 : 0,
+  pushFont.setAdvanceHandler(&advanceOnly, nullptr);
+  LOG_INF("PFNT", "installed: pif1=%d sd=%d binChars=%u advOnly=1", g_reader ? 1 : 0, g_sdFont ? 1 : 0,
           g_view.valid() ? g_view.count() : 0u);
 }
 

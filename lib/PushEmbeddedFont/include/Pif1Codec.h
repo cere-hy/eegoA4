@@ -192,4 +192,17 @@ inline int scaledLeft(int8_t x0, int px) { return floorDiv(int(x0) * px, int(kPi
 inline int scaledTop(int8_t y0, int px) { return floorDiv(int(y0) * px, int(kPif1BasePx)); }
 inline int scaledW(uint8_t w24, int px) { return (int(w24) * px + int(kPif1BasePx) - 1) / int(kPif1BasePx); }
 
+// S3c final — advance-only query for a PIF1 bitmap glyph. Reads ONLY record[4]
+// (the base-24 advance) from the already-decoded record; no coverage(), no
+// 2-bit packing, no bitmap arena write. `out12_4` is the same 12.4 fixed-point
+// advance the draw-time secondary() injects (scaledAdvance(rec[4],px) << 4), so
+// measure and draw produce byte-identical advances. Returns false when the
+// codepoint is absent. `px` is the asc-desc height (pif1PxFromEmPx of em ppem).
+inline bool pif1AdvanceOnly(Pif1Reader& reader, uint32_t cp, int px, uint16_t& out12_4) {
+  uint8_t rec[kPif1Record];
+  if (!reader.get(cp, rec)) return false;
+  out12_4 = static_cast<uint16_t>(scaledAdvance(rec[4], px) << 4);
+  return true;
+}
+
 }  // namespace pushembedfont

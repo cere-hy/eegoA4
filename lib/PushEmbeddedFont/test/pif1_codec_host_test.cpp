@@ -50,6 +50,23 @@ int main(int argc, char** argv) {
   CHECK(reader.get(0x5242, rec), "decode record U+5242 (block10 cache miss)");
   CHECK(reader.get(0x4E07, rec), "decode record U+4E07 again (block0 re-cache)");
 
+  // S3c final — advance-only query for layout: must equal the draw-time injected
+  // advance byte-for-byte (scaledAdvance(rec[4], px) << 4), for every tier-2 char.
+  {
+    const int pxTest = 42;  // pt14 -> em ppem 29.17 -> asc-desc px 42
+    const unsigned advChars[] = {0x4E07, 0x4EC1, 0x5242, 0x300A};
+    for (unsigned cp : advChars) {
+      uint8_t r[kPif1Record];
+      CHECK(reader.get(cp, r), "adv-only: record readable");
+      uint16_t aOnly = 0;
+      CHECK(pif1AdvanceOnly(reader, cp, pxTest, aOnly), "adv-only: query succeeds");
+      CHECK(aOnly == static_cast<uint16_t>(scaledAdvance(r[4], pxTest) << 4),
+            "adv-only: matches draw-time injected advance (record[4])");
+    }
+    uint16_t dummy = 0;
+    CHECK(!pif1AdvanceOnly(reader, 0x4E00, pxTest, dummy), "adv-only: absent cp fails");
+  }
+
   // Coverage interpolation at 24px must reproduce the source bitmap exactly.
   uint8_t rec24[kPif1Record];
   CHECK(reader.get(0x4E07, rec24), "re-read U+4E07 for coverage");

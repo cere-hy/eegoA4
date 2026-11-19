@@ -142,6 +142,9 @@ bool TtfEpdFont::load(const uint16_t pointSize, const bool twoBit, const size_t 
     // at a previous size would serve stale metrics — and their bitmaps get
     // overwritten as new-size glyphs refill the arena from offset 0.
     flushFace(f);
+    // Advance values depend on size26_6_; a reload at a new point size must
+    // drop cached advances or measure would disagree with draw.
+    freeink::font::PsramVector<Face::AdvanceEntry>().swap(f.advances);
     f.ligPairCount = 0;                  // re-resolved in initFace; stale pairs must not leak
     for (uint32_t& g : f.ligGid) g = 0;  // across a reload with new sources
   }
@@ -184,6 +187,7 @@ bool TtfEpdFont::loadVariantOf(TtfEpdFont& master, const uint16_t pointSize, con
     f.ready = false;
     f.initFailures = 0;
     flushFace(f);
+    freeink::font::PsramVector<Face::AdvanceEntry>().swap(f.advances);
     f.ligPairCount = 0;
     for (uint32_t& g : f.ligGid) g = 0;
   }
@@ -397,6 +401,7 @@ void TtfEpdFont::releaseResidentCaches() {
     freeink::font::PsramVector<EpdGlyph>().swap(f.glyphs);
     freeink::font::PsramVector<uint32_t>().swap(f.cps);
     freeink::font::PsramVector<uint16_t>().swap(f.slot);
+    freeink::font::PsramVector<Face::AdvanceEntry>().swap(f.advances);
     freeink::font::PsramVector<uint64_t>().swap(f.kernKeys);
     freeink::font::PsramVector<int8_t>().swap(f.kernVals);
     // Keep the regular face's FreeType face live so coverage()/metrics still
@@ -651,6 +656,69 @@ const EpdGlyph* TtfEpdFont::findGlyph(Face& f, const uint32_t cp) const {
     return &f.glyphs[f.slot[static_cast<size_t>(it - f.cps.begin())]];
   }
   return nullptr;
+}
+
+// S3c final — advance-only query for layout measurement. NEVER rasterizes.
+// The advance returned is byte-identical to what faultGlyph() would cache
+// (same gm.advance26_6 -> truncate26_6_to_4, or the same secondary source), so
+// measure and draw cannot disagree. FreeType loads happen at most ONCE per
+// codepoint per face and the 12.4 result lives in `f.advances`, which persists
+// across page turns (unlike the rasterized glyph arena).
+bool TtfEpdFont::getAdvance(const uint32_t cp, const uint8_t style, uint16_t& adv12_4) {
+  if (style >= 4 || !loaded_) return false;
+  Face& f = faces_[style];
+  if (!f.inited || (master_ && !master_->faces_[style].ready)) initFace(f);
+  if (!f.ready) return false;
+
+  // 1) Served from the persistent advance table — zero FreeType work.
+  {
+    const auto it = std::lower_bound(f.advances.begin(), f.advances.end(), cp,
+                                     [](const Face::AdvanceEntry& e, uint32_t c) { return e.cp < c; });
+    if (it != f.advances.end() && it->cp == cp) {
+      adv12_4 = it->adv12_4;
+      return true;
+    }
+  }
+
+  // Hard cap: if the table is full, defer to the caller's ordinary (slower)
+  // path rather than grow unbounded. Bounded memory, no correctness loss.
+  const size_t cap = (style == 0) ? 4096u : 512u;
+  if (f.advances.size() >= cap) return false;
+
+  int32_t adv = 0;
+  bool have = false;
+  const size_t faceIdx = static_cast<size_t>(&f - faces_);
+  FaceLock lock(master_ ? master_ : this, faceIdx);
+  const freeink::font::FtFont::GlyphId gid = f.ft->glyphId(cp);
+  if (gid != 0 || (cp >= 0xFB00u && cp <= 0xFB04u && f.ligGid[cp - 0xFB00u] != 0)) {
+    // 2) Vector glyph: ONE metrics load (FT_Load_Glyph, no FT_Render_Glyph).
+    const freeink::font::FtFont::GlyphId useGid =
+        gid ? gid : f.ligGid[cp - 0xFB00u];
+    freeink::font::FtFont::GlyphMetrics gm;
+    if (f.ft->metricsGlyph26_6(useGid, size26_6_, gm)) {
+      adv = fp4::truncate26_6_to_4(gm.advance26_6);
+      have = true;
+    }
+  }
+  if (!have && advanceHandler_ != nullptr) {
+    // 3) cmap miss: ask PIF1 (record[4]) / SD fallback for advance only.
+    uint16_t secondaryAdv = 0;
+    if (advanceHandler_(advanceCtx_, cp, static_cast<uint8_t>(style), *this, secondaryAdv)) {
+      adv = secondaryAdv;
+      have = true;
+    }
+  }
+  if (!have) return false;
+
+  // Insert ordered; advanceX is uint16_t 12.4 (clamp negatives to 0, as faultGlyph).
+  const uint16_t store = static_cast<uint16_t>(adv < 0 ? 0 : adv);
+  const auto pos = std::lower_bound(f.advances.begin(), f.advances.end(), cp,
+                                    [](const Face::AdvanceEntry& e, uint32_t c) { return e.cp < c; });
+  static constexpr size_t kAdvanceStep = 64;
+  if (!reserveChecked(f.advances, f.advances.size() + 1, kAdvanceStep, cap)) return false;
+  f.advances.insert(pos, Face::AdvanceEntry{cp, store});
+  adv12_4 = store;
+  return true;
 }
 
 const EpdGlyph* TtfEpdFont::injectGlyph(const uint8_t style, const uint32_t cp, const uint8_t w, const uint8_t h,

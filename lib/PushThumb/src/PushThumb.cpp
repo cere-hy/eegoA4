@@ -208,31 +208,41 @@ bool writeCoverBmp(WriteFn sink, void* ctx, const CoverInfo& info) {
     pushX += cellI + 4;
   }
 
-  // Time line: adaptive scale, centred; split into date / time if it will not fit.
-  if (info.timeText && info.timeText[0]) {
-    const int sc = fitScale8(info.timeText);
-    if (sc > 0) {
-      drawText8(cv, info.timeText, 200, sc);
-    } else {
-      // Fallback: split "YYYY-MM-DD HH:MM" into two centred lines at scale 1.
-      const char* sp = std::strchr(info.timeText, ' ');
-      if (sp) {
-        const size_t n = static_cast<size_t>(sp - info.timeText);
-        std::string date(info.timeText, n);
-        std::string clock(sp + 1);
-        drawText8(cv, date.c_str(), 192, 1);
-        drawText8(cv, clock.c_str(), 204, 1);
-      } else {
-        drawText8(cv, info.timeText, 200, 1);
-      }
-    }
-  }
+  // S3c final (甲方案): time line moved BELOW the byte-count line so the
+  // home-card theme's centred title box (canvas y~177..222, PUSH) no longer
+  // covers it. Large PUSH (y100..147) and byte count (y252..265) are UNCHANGED.
+  // Time line target y290..296: gap to byte-count bottom (265) is 25px (>=20),
+  // clear of the theme title box bottom (222), above the Continue Reading
+  // button (y361..391), and within the y320 safety ceiling. Scale/fitScale8,
+  // centring on x120 and stride are all untouched.
 
   // Byte count MUST carry a unit. "4458 bytes" is 10 chars -> scale 2 fits (160px).
   char line[48];
   std::snprintf(line, sizeof(line), "%zu bytes", info.byteCount);
   const int bsc = fitScale8(line);
   drawText8(cv, line, 252, bsc > 0 ? bsc : 1);
+
+  // Time line: adaptive scale, centred; split into date / time if it will not fit.
+  if (info.timeText && info.timeText[0]) {
+    const int sc = fitScale8(info.timeText);
+    if (sc > 0) {
+      drawText8(cv, info.timeText, 290, sc);
+    } else {
+      // Fallback: split "YYYY-MM-DD HH:MM" into two centred lines at scale 1.
+      // y286 / y300: first line >= 21px below byte-count bottom, second ends
+      // y306 (< y320 ceiling), both above the Continue Reading button.
+      const char* sp = std::strchr(info.timeText, ' ');
+      if (sp) {
+        const size_t n = static_cast<size_t>(sp - info.timeText);
+        std::string date(info.timeText, n);
+        std::string clock(sp + 1);
+        drawText8(cv, date.c_str(), 286, 1);
+        drawText8(cv, clock.c_str(), 300, 1);
+      } else {
+        drawText8(cv, info.timeText, 290, 1);
+      }
+    }
+  }
 
   uint8_t header[headerSize];
   std::memset(header, 0, sizeof(header));
