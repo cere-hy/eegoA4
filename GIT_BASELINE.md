@@ -117,3 +117,15 @@
 - 关键修复：fontFamily/sdFontFamilyName 字段一致性。项A applyFamily SD 分支同步 fontFamily=NOTOSANS（消除 FAST+LXGW 半选态）；项B fromJson 缺字段默认回退 STORED_NOTOSANS（S3c+ 静默变更回滚，不改已存值）；项C relinkUiFallbacks FAST 下 builtin 提主 fallback、SD 降二级（不改 resolveTextFontId/UiFallbackChain 本体，不引入新字段），ensureLoaded 入口幂等重链修正开机时序。FAST 下 sdFontFamilyName 保留供 tier③ 兜底
 - host 15/15 全绿；验收核心：UI 显示与正文渲染始终一致（⑤）、点选 LXGW 选中态立即保持（⑪）
 - 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-cn-pushfont2_factory.bin`（待真机验收，非日常用件）
+
+## S3cPF3 (b65-s3c-pf3) 指纹
+
+- commit `6dc04b07`（8 文件 / +101 / −8；前一干净基线 `bb6c42ba`）
+- app sha256 `1c52ba659b5c4ef5b97b4892fccad0d0059ce184d5106d49d205fdc1ff7f7a5b`（6,021,712 B）
+- factory sha256 `42b81386b34c1f9c0a313218effceb4a885ceaad9901afc5131515050116da35`（6,087,248 B；factory−app=65,536）
+- A 级双冷编：app/factory/elf/MANIFEST 四产物逐字节 IDENTICAL，A_LEVEL_CLOSURE=PASS，epoch=1794813449，真实退出码 0（两次）
+- D1：TextSettingsActivity Family tab 末尾加「PUSH 字体」独立行，复用 optionPopup_ 二选项（内置=0/跟随全局=1），沿用 pushFontMode 持久化；不改主设置页 inTextSettings 过滤，不加第五 tab。切换即 saveToFile，缓存靠 spec.fontId 失效
+- P1 图标：Lyra PUSH 项从 UIIcon::Text（iconForName 无匹配→nullptr→不画）改为 UIIcon::Push→PushIcon（push.h 32×32 inbox，按 drawIcon (X=31-row,Y=col) 逆变换生成，真机方向正确）；封面网格 HomeActivity::appendPushToCoverGrid 把 /PUSH.txt 作虚拟书追加为末格，封面路径与 push thumb_400.bmp 一致
+- D2 日志：effectiveReaderFontId 单出口打 [ERS] reader font: book/mode/fontId；ensurePushFont 重建分支打 [SDFS] push face rebuilt: pt/reason。仅观测，不动耗时/缓存逻辑
+- host 15/15 全绿；验收核心：①-⑦ D1 可达与交互、⑧-⑫ 图标与网格、⑬-⑭ 日志、⑮-⑯ 不回归与三主题
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf3_factory.bin`（待真机验收，非日常用件）
