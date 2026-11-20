@@ -372,10 +372,20 @@ int EpubReaderActivity::effectiveReaderFontId() const {
       if (id != 0) resolved = id;
     }
   }
-  // b65-s3c-pf3 D2: single-exit log so the next push shows which face a book
-  // actually resolved to and the active PUSH source, no more guessing.
-  LOG_DBG("ERS", "reader font: book=%s mode=%u fontId=%d", bookPath.c_str(),
-          static_cast<unsigned>(SETTINGS.pushFontMode), resolved);
+  // b65-s3c-pf3 D2 diagnostic, b65-s3c-pf4 P1 de-dup: effectiveReaderFontId()
+  // is called from up to 4 per-page hot paths (~50 identical lines / 620ms),
+  // and serial logging at 115200 baud cost hundreds of ms. Log only when the
+  // (book, mode, fontId) triple actually changes; keep the line as the sole
+  // PUSH-face diagnostic (never delete it).
+  const unsigned mode = static_cast<unsigned>(SETTINGS.pushFontMode);
+  if (!lastReaderFontLog_.valid || lastReaderFontLog_.book != bookPath ||
+      lastReaderFontLog_.mode != mode || lastReaderFontLog_.fontId != resolved) {
+    LOG_DBG("ERS", "reader font: book=%s mode=%u fontId=%d", bookPath.c_str(), mode, resolved);
+    lastReaderFontLog_.valid = true;
+    lastReaderFontLog_.book = bookPath;
+    lastReaderFontLog_.mode = mode;
+    lastReaderFontLog_.fontId = resolved;
+  }
   return resolved;
 }
 

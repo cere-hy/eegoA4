@@ -174,6 +174,16 @@ class EpubReaderActivity final : public ReaderActivity {
   // S3c: PUSH documents use the dedicated embedded font; every other book keeps
   // the user's global reader font. Centralizes the font-id choice.
   int effectiveReaderFontId() const;
+  // b65-s3c-pf4 P1: [ERS] reader-font log is called from 4 hot paths (spec,
+  // idle lookahead, page render, contents) — up to ~50 identical lines/620ms.
+  // De-dup on the resolved (book, mode, fontId) triple: log only on change.
+  struct ReaderFontLogKey {
+    bool valid = false;
+    std::string book;
+    unsigned mode = 0;
+    int fontId = 0;
+  };
+  mutable ReaderFontLogKey lastReaderFontLog_;
   ReaderRenderSpec readerRenderSpecForCurrentBook(uint16_t w, uint16_t h) const;
   void showBuildPopup(GfxRenderer& renderer, int& pagesUntilFullRefresh);
   bool applyDeferredReposition();

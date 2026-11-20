@@ -97,14 +97,26 @@ void HomeActivity::fillCoverGridFromLibrary() {
   }
 }
 
-void HomeActivity::appendPushToCoverGrid() {
-  // b65-s3c-pf3 P1: surface the pushed document as the LAST grid tile (the
-  // grid shows books[1..], books[0] is the featured card) so it never displaces
-  // the "recently read" ordering. Only when a push actually exists and is not
-  // already in the list; capacity is bounded by CoverGridHomeUi::MAX_BOOKS.
+void HomeActivity::ensurePushHomeTile(int displaySlots) {
+  // b65-s3c-pf4 P1/P2: PUSH is a home tile on EVERY theme, not just COVER_GRID.
+  // Root cause of "black book placeholder on Lyra/grid": the PUSH cover is a
+  // single fixed thumb_400.bmp (PushThumb), but RecentBook stores its path with
+  // a [HEIGHT] token; each theme substituted its own homeCoverHeight
+  // (226/300...) and requested a thumb_226/300.bmp that never exists, so the
+  // cover was dropped to the empty-book placeholder. Fix: pin PUSH's path to
+  // the concrete thumb_400.bmp (no token) so getCoverThumbPath() is a no-op and
+  // every theme's drawCoverThumbFill crops the 240x400 art into its own card.
   constexpr const char* kPushPath = "/PUSH.txt";
   if (!Storage.exists(kPushPath)) return;
-  if (recentBooks.size() >= static_cast<size_t>(CoverGridHomeUi::MAX_BOOKS)) return;
+
+  // Pin any already-recorded PUSH book (e.g. opened before this firmware) to 400.
+  for (auto& book : recentBooks) {
+    if (book.path == kPushPath) {
+      auto epub = makeUniqueNoThrow<Epub>(kPushPath, "/.crosspoint");
+      if (epub) book.coverBmpPath = epub->getThumbBmpPath(400);
+    }
+  }
+  if (recentBooks.size() >= static_cast<size_t>(displaySlots)) return;
   if (std::any_of(recentBooks.begin(), recentBooks.end(),
                   [](const RecentBook& b) { return b.path == kPushPath; }))
     return;
@@ -112,11 +124,10 @@ void HomeActivity::appendPushToCoverGrid() {
   RecentBook pushBook;
   pushBook.path = kPushPath;
   pushBook.title = tr(STR_PUSH);
-  // PUSH's generated cover shares the Epub cache path/format, so deriving it
-  // through Epub() gives the exact thumb_400.bmp resolveGridCoverPaths expects.
+  // Concrete 400 path — NOT getThumbBmpPath() (which carries [HEIGHT]).
   {
     auto epub = makeUniqueNoThrow<Epub>(kPushPath, "/.crosspoint");
-    if (epub) pushBook.coverBmpPath = epub->getThumbBmpPath();
+    if (epub) pushBook.coverBmpPath = epub->getThumbBmpPath(400);
   }
   recentBooks.push_back(std::move(pushBook));
 }
@@ -269,11 +280,19 @@ void HomeActivity::onEnter() {
     if (!coverGridUi) LOG_ERR("HOME", "OOM: cover grid UI; using standard home");
   }
   loadRecentBooks(coverGridUi ? CoverGridHomeUi::MAX_BOOKS : metrics.homeRecentBooksCount);
-  hasContinueReading = !recentBooks.empty();
   if (coverGridUi) {
     fillCoverGridFromLibrary();
-    appendPushToCoverGrid();  // b65-s3c-pf3 P1: PUSH tile at the end of the grid
+    ensurePushHomeTile(CoverGridHomeUi::MAX_BOOKS);  // b65-s3c-pf4: PUSH tile + pinned 400 cover
     resolveGridCoverPaths();
+  } else {
+    // b65-s3c-pf4: non-grid themes (Classic/Lyra/Lyra3Covers/RoundedRaff) also
+    // get a PUSH tile and the pinned 400 cover path; without this PUSH only
+    // appeared if it happened to be in RECENT_BOOKS and requested a missing
+    // thumb_<height>.bmp -> empty-book placeholder.
+    ensurePushHomeTile(metrics.homeRecentBooksCount);
+  }
+  hasContinueReading = !recentBooks.empty();
+  if (coverGridUi) {
     const HomeMenuItem slot = slotItem();
     coverGridUi->begin(recentBooks,
                        slot == HomeMenuItem::PLUGINS        ? CoverGridHomeUi::SlotTab::PLUGINS

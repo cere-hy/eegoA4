@@ -91,9 +91,12 @@ class HomeActivity final : public Activity {
   void loadRecentBooks(int maxBooks);
   void loadRecentCovers(int coverHeight);
   void fillCoverGridFromLibrary();
-  // b65-s3c-pf3 P1: append /PUSH.txt as a virtual tile to the cover grid so
-  // the pushed document is reachable from the shelf with its generated cover.
-  void appendPushToCoverGrid();
+  // b65-s3c-pf4 P1/P2: guarantee the pushed document is a home tile on EVERY
+  // theme (not just COVER_GRID). Normalizes PUSH's cover path to the single
+  // generated thumb_400.bmp (no [HEIGHT] token) so Lyra/Lyra3Covers/
+  // RoundedRaff cannot request a non-existent thumb_226/300.bmp, then appends
+  // a virtual PUSH book into the visible slot range when absent.
+  void ensurePushHomeTile(int displaySlots);
   void resolveGridCoverPaths();
   void loadGridCover(RecentBook& book, int height, bool& showingLoading, Rect& popupRect);
 
