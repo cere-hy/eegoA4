@@ -107,3 +107,13 @@
 - 关键能力：PUSH Font 设置项（Built-in=0 默认 / Follow Global=1），由 SettingInfo::Enum 自动持久化；Follow Global 下 PUSH 书复用全局 face + per-face 热 advance 表（跨书共享，改动量 0），Built-in 路径零改动；预加载按裁定不实施
 - host 15/15 全绿；验证重点：设置项切换/持久化、Follow Global 首屏跟随全局、Built-in 零回归
 - 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-cn-pushfont_factory.bin`（待真机验收，非日常用件）
+
+## S3cPF2 (b65-s3c-cn-pushfont2) 指纹
+
+- commit `2f031f16`（3 文件 / +52 / −2-9；前一干净基线 `388408df`）
+- app sha256 `e7fb6062a6bf50e8b0f64fadf68b3fda4e3f2c690fadb2ba20c25580cda06be3`（6,020,544 B）
+- factory sha256 `83d3514d0755e39a7830e0d5e93e383ec2bb686bdc65313db8ba3c3aababc7e3`（6,086,080 B；factory−app=65,536）
+- A 级双冷编：app/factory/elf/MANIFEST 四产物逐字节 IDENTICAL，A_LEVEL_CLOSURE=PASS，epoch=1794813449，真实退出码 0
+- 关键修复：fontFamily/sdFontFamilyName 字段一致性。项A applyFamily SD 分支同步 fontFamily=NOTOSANS（消除 FAST+LXGW 半选态）；项B fromJson 缺字段默认回退 STORED_NOTOSANS（S3c+ 静默变更回滚，不改已存值）；项C relinkUiFallbacks FAST 下 builtin 提主 fallback、SD 降二级（不改 resolveTextFontId/UiFallbackChain 本体，不引入新字段），ensureLoaded 入口幂等重链修正开机时序。FAST 下 sdFontFamilyName 保留供 tier③ 兜底
+- host 15/15 全绿；验收核心：UI 显示与正文渲染始终一致（⑤）、点选 LXGW 选中态立即保持（⑪）
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-cn-pushfont2_factory.bin`（待真机验收，非日常用件）
