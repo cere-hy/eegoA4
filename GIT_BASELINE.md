@@ -97,3 +97,13 @@
 - A 级双冷编（双删 .pio/build + .cache、无管道 source、`SOURCE_DATE_EPOCH=1794813449` 断言、PIPESTATUS[0] 真实退出码）：app/factory/elf/MANIFEST 四产物逐字节 IDENTICAL，CMP_RC=0，REPRODUCIBLE OK
 - 关键能力：UI 字符串级链式 fallback（ubuntu 点阵 → SD 用户字体 → 内置 builtin.ttf variant → 占位符，UiFallbackChain.h device/host 同码）；三档常驻 UI variant 8/10/12pt（16KB/384 each）复用 installInto 的 PIF1 二级；中文语言包 647 key 全译、CHINESE/zh-Hans、36 语言、切换即生效
 - 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-cn_factory.bin`（待真机验收，非日常用件）
+
+## S3cPF / S3c-cn+ (b65-s3c-cn-pushfont) 指纹
+
+- commit `e32afd41`（5 文件 / +30 / −2；前一干净基线 `0a00d0c6`）
+- app sha256 `e7d0452d213a44e3fe5bdb71c0ff8b56e140872fb743b6c78a2c0653e549bd5f`（6,020,480 B）
+- factory sha256 `38bfc41d6eec22eae099d2306668be5549d0bb143abece973fb5e309fa019d29`（6,086,016 B；factory−app=65,536）
+- A 级双冷编（双删 .pio/build + .cache、无管道 source、`SOURCE_DATE_EPOCH=1794813449` 断言、PIPESTATUS[0] 真实退出码）：app/factory/elf/MANIFEST 四产物逐字节 IDENTICAL，A_LEVEL_CLOSURE=PASS
+- 关键能力：PUSH Font 设置项（Built-in=0 默认 / Follow Global=1），由 SettingInfo::Enum 自动持久化；Follow Global 下 PUSH 书复用全局 face + per-face 热 advance 表（跨书共享，改动量 0），Built-in 路径零改动；预加载按裁定不实施
+- host 15/15 全绿；验证重点：设置项切换/持久化、Follow Global 首屏跟随全局、Built-in 零回归
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-cn-pushfont_factory.bin`（待真机验收，非日常用件）
