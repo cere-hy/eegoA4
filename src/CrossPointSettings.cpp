@@ -269,9 +269,13 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   if (!doc["advanceOnlyLayout"].isNull()) advanceOnlyLayout = doc["advanceOnlyLayout"] | true;
 
   // Font family — uses dynamic getter/setter in SettingsList so the generic loop skips it.
-  // S3c+裁定: absent fontFamily defaults to Built-in (Fast) selected, with
-  // sdFontFamilyName empty (handled below) — never a half-selected state.
-  const uint8_t storedFontFamily = doc["fontFamily"] | STORED_BUILTIN_FAST;
+  // b65-s3c-cn-pushfont2: absent fontFamily defaults back to STORED_NOTOSANS
+  // (the S3c+ pre-FAST behavior). S3c+ silently changed this fallback to
+  // STORED_BUILTIN_FAST, locking every old/missing-field config onto the PUSH
+  // embedded face with no user consent. Only the MISSING-field fallback changes;
+  // an explicitly stored value is still honored verbatim below. User who wants
+  // FAST must select it — it is never imposed by an absent key.
+  const uint8_t storedFontFamily = doc["fontFamily"] | STORED_NOTOSANS;
   fontFamily = (storedFontFamily == STORED_BUILTIN_FAST) ? BUILTIN_FAST : NOTOSANS;
   // These controls use board-specific display-index mappings and are skipped by
   // the generic settings loop. Persisted action IDs remain stable across boards.

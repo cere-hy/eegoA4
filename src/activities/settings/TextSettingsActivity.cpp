@@ -335,6 +335,13 @@ void TextSettingsActivity::applyFamily(int listIndex) {
     if (sdIdx < static_cast<int>(families.size())) {
       strncpy(SETTINGS.sdFontFamilyName, families[sdIdx].name.c_str(), sizeof(SETTINGS.sdFontFamilyName) - 1);
       SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
+      // b65-s3c-cn-pushfont2 项A: SD 字体必须由 fontFamily 也表达, 否则停留在
+      // BUILTIN_FAST 时 getReaderFontId() 的 FAST 分支会永久压制 sdFontFamilyName,
+      // 形成 "fontFamily=FAST + sdFontFamilyName=LXGW" 半选态(正文锁死 PUSH face,
+      // 设置页却显示 FAST, UI 字形却是楷体). 同步为非 FAST 的内置占位即可消除.
+      // 取 NOTOSANS: SD 字体激活时 getReaderFontId() 走 sdFontFamilyName 分支优先,
+      // fontFamily 仅在 SD 名缺失时才作为兜底, 故 NOTOSANS 是正确的"非 FAST"值.
+      SETTINGS.fontFamily = CrossPointSettings::NOTOSANS;
       sdFontSystem.ensureLoaded(renderer);
       currentFamilyIndex_ = listIndex;
     }

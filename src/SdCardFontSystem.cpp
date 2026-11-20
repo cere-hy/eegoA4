@@ -227,6 +227,13 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
     registry_.discover();
   }
 
+  // b65-s3c-cn-pushfont2 项C: SETTINGS.loadFromFile() runs AFTER begin() at
+  // boot, so the chain built in begin() used the struct-default fontFamily,
+  // not the persisted one. Re-link once here (idempotent clear+set) so the
+  // FAST/normal UI-fallback order always reflects the loaded setting before
+  // any early return below. Later loadTtfFamily/setupUiFallbacks re-link again.
+  relinkUiFallbacks(renderer);
+
   const char* wantedFamily = SETTINGS.sdFontFamilyName;
 
 #if CROSSPOINT_VECTOR_FONTS
@@ -342,20 +349,43 @@ void SdCardFontSystem::setupBuiltinUiFallbacks(GfxRenderer& renderer) {
 void SdCardFontSystem::relinkUiFallbacks(GfxRenderer& renderer) {
 #if CROSSPOINT_VECTOR_FONTS
   // Chain topology (device + host share UiFallbackChain.h decision logic):
-  //   ubuntu (primary) → sdUiIds_[i] (if any) → builtinUiIds_[i] → end
-  // Rebuilt from scratch after any SD font load/unload so a stale SD id can
-  // never dangle in the map. setFallbackFont is idempotent (map assignment).
+  //   Normal (SD user font is the active reader font):
+  //     ubuntu (primary) → sdUiIds_[i] (if any) → builtinUiIds_[i] → end
+  //     so UI Han renders in the user's chosen font (LXGW etc.) — matches body.
+  //   Built-in (Fast) active reader font:
+  //     ubuntu (primary) → builtinUiIds_[i] (main) → sdUiIds_[i] (secondary) → end
+  //     so UI Han renders in the builtin black face — matches the FAST body —
+  //     while the SD font stays as a secondary tier for codepoints absent from
+  //     builtin.ttf (rare glyphs still resolve via SD, never a tofu box).
+  // b65-s3c-cn-pushfont2 项C: "显示什么渲染什么" — FAST 下 UI 主 fallback
+  // 改为内置 variant, SD 降为内置 variant 的二级 fallback。两种顺序的链末
+  // 都仍是 builtin 体系/builtin variant 的 PIF1 + tier④ 占位符, 故极生僻字
+  // 兜底不变。resolveChain / resolveTextFontId 本体不动。
+  const bool fastActive = (SETTINGS.fontFamily == CrossPointSettings::BUILTIN_FAST);
   renderer.clearFallbackFonts();  // one-shot: 3-entry map, clears all stale links
   for (size_t i = 0; i < std::size(kUiFontSizes); ++i) {
     const int primary = kUiFontSizes[i].fontId;
     const int builtin = builtinUiIds_[i];
     const int sd = sdUiIds_[i];
-    if (sd != 0) renderer.setFallbackFont(primary, sd);
-    if (builtin != 0) {
+    if (fastActive) {
+      // ubuntu → builtin(main) → sd(secondary, rare-glyph tier) → end
+      if (builtin != 0) renderer.setFallbackFont(primary, builtin);
       if (sd != 0) {
-        renderer.setFallbackFont(sd, builtin);       // tier② → tier③
-      } else {
-        renderer.setFallbackFont(primary, builtin);  // no SD: builtin is tier②
+        if (builtin != 0) {
+          renderer.setFallbackFont(builtin, sd);  // builtin(main) → sd(secondary)
+        } else {
+          renderer.setFallbackFont(primary, sd);  // builtin absent: sd is the only tier
+        }
+      }
+    } else {
+      // ubuntu → sd(if any) → builtin → end (unchanged user-font-first chain)
+      if (sd != 0) renderer.setFallbackFont(primary, sd);
+      if (builtin != 0) {
+        if (sd != 0) {
+          renderer.setFallbackFont(sd, builtin);       // tier② → tier③
+        } else {
+          renderer.setFallbackFont(primary, builtin);  // no SD: builtin is tier②
+        }
       }
     }
   }
