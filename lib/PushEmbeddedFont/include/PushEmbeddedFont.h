@@ -47,12 +47,21 @@ struct Stats {
 // S3c+ engineering rule: tier-③ is per-face so PUSH/FAST and any other face
 // cannot overwrite each other's SD fallback pointer.
 struct FallbackContext {
-  TtfEpdFont* sdFont = nullptr;  // tier ③ (LXGW). nullptr disables tier ③.
-  Stats stats{};                 // diagnostics (per-face)
+  TtfEpdFont* sdFont = nullptr;      // tier ③ (SD font). nullptr disables tier ③.
+  TtfEpdFont* builtinFace = nullptr; // tier ① (builtin.ttf vector) for SD-vector faces;
+                                     // nullptr for PUSH/FAST (themselves primary).
+  Stats stats{};                     // diagnostics (per-face)
   uint32_t cjkSeen = 0;
   uint32_t cjkMissing = 0;
-  void* unavailable = nullptr;   // std::atomic<bool>* when provided
+  void* unavailable = nullptr;       // std::atomic<bool>* when provided
 };
+
+// Install the SAME secondary/advance handler chain into an SD vector face
+// (DejaVuSans / LXGW / any .ttf). `builtinFace` supplies tier ① (builtin.ttf
+// vector glyphs), PIF1 supplies tier ②, `sdFont` (tier ③) is intentionally
+// nullptr — the face IS the user's chosen SD font, so self-referencing is a
+// no-op and recursing is forbidden. `ctx` must outlive `font`. Idempotent.
+void installSdVectorFallback(TtfEpdFont& font, FallbackContext& ctx, TtfEpdFont& builtinFace);
 
 // Set the SD fallback font (tier ③) for a context. `font` must outlive every
 // face whose handler carries this ctx. Pass nullptr to disable tier ③ (used on

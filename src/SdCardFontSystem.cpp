@@ -72,6 +72,16 @@ constexpr UiFontSize kUiFontSizes[] = {
 
 }  // namespace
 
+void SdCardFontSystem::refreshSdVectorFallback() {
+#if CROSSPOINT_VECTOR_FONTS
+  // Both faces must be live. The SD-vector face (ttf_) gets the chain; tier①
+  // is the embedded builtin face (pushTtf_). Tier③ deliberately unset.
+  if (ttf_ && pushTtf_) {
+    pushembedfont::installSdVectorFallback(*ttf_, sdTtfFallback_, *pushTtf_);
+  }
+#endif
+}
+
 int SdCardFontSystem::ensurePushFont(GfxRenderer& renderer) {
 #if CROSSPOINT_VECTOR_FONTS
   // S3c+ tier③ points at the active SD (LXGW) face, PER-FACE via pushFallback_.
@@ -116,6 +126,9 @@ int SdCardFontSystem::ensurePushFont(GfxRenderer& renderer) {
   // built-in Noto Sans can serve CJK misses from tiers ①-③. Updated on every
   // point-size rebuild; cleared on teardown below.
   pushembedfont::setEmbeddedFace(pushTtf_.get());
+  // S3c-plus2: embedded face just became available — wire the SD-vector face's
+  // fallback chain now (no-op if no SD vector font is loaded).
+  refreshSdVectorFallback();
   LOG_INF("SDFS", "PUSH embedded font ready @%upt (id %d, cache %u KB)", pt, id, (unsigned)(cacheBytes / 1024));
   return id;
 #else
@@ -679,6 +692,8 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
       renderer.insertFont(ttfFontId_, ttf_->family());
       renderer.registerTtfFont(ttfFontId_, ttf_.get());
       ttfPointSize_ = size;
+      // S3c-plus2: reader face rebuilt at new size — rewire its fallback ctx.
+      refreshSdVectorFallback();
       return;
     }
     // Resize failed: fall through to a clean full reload.
@@ -746,6 +761,10 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
   // This also re-arms tier③ after a delete-then-reinstall or a point-size
   // change, so生僻字 keep resolving via SD and never degrade permanently.
   pushembedfont::setSdFallback(pushFallback_, ttf_.get());
+  // S3c-plus2: wire this SD vector face's own fallback chain (tier① embedded
+  // builtin + tier② PIF1; tier③ unset). No-op until pushTtf_ exists at startup;
+  // ensurePushFont() re-calls this once the embedded face is ready.
+  refreshSdVectorFallback();
   LOG_DBG("SDFS", "Reader TTF face loaded (heap free %u, max block %u)", (unsigned)ESP.getFreeHeap(),
           (unsigned)ESP.getMaxAllocHeap());
   setupTtfUiFallbacks(renderer);  // CJK/script UI fallback at the built-in UI sizes

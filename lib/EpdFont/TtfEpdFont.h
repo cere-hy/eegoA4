@@ -128,6 +128,14 @@ class TtfEpdFont {
   }
   bool getAdvance(uint32_t codepoint, uint8_t style, uint16_t& adv12_4);
 
+  // S3c-plus2: PRIMARY-ONLY advance probe for a fallback handler. Returns the
+  // builtin/own-face vector advance (ordered table or ONE cmap metrics load),
+  // NEVER calls advanceHandler_ and NEVER rasterizes or writes any table. This
+  // is what lets the SD-vector fallback's tier ① consult the embedded builtin
+  // face without re-entering that face's own secondary/advance chain (which
+  // would recurse back into this SD face -> stack overflow).
+  bool primaryAdvanceOnly(uint32_t codepoint, uint8_t style, uint16_t& adv12_4);
+
   // Inject an already-2-bit rasterized glyph into `style`'s arena. `bmp2bit` is
   // byte-packed exactly like EpdFontData (2 bits/px when twoBit, MSB-first;
   // 1 bit/px otherwise), `bytes` its length. Returns the cached EpdGlyph or null

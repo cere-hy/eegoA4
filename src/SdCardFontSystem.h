@@ -101,6 +101,10 @@ class SdCardFontSystem {
   bool openTtfSource(uint8_t style, const std::string& path);
   // Register every present source with `font` (shared bytes / file handles).
   void addTtfSources(TtfEpdFont& font);
+  // S3c-plus2: (re)wire the SD-vector reader face's fallback chain once both
+  // `ttf_` and the embedded `pushTtf_` exist. Safe to call repeatedly; no-op
+  // if either face is absent.
+  void refreshSdVectorFallback();
   // Close/free all style sources.
   void freeTtfSources();
   // ReadFn for streamed sources: serves the PSRAM prefix cache first, SD after.
@@ -164,6 +168,10 @@ class SdCardFontSystem {
   // S3c+ per-face fallback state: tier③ points at the active SD (LXGW) face.
   // Lives as long as this system, so handler ctx never dangles before unload.
   pushembedfont::FallbackContext pushFallback_;
+  // S3c-plus2: independent fallback ctx for the SD-VECTOR reader face (ttf_).
+  // tier① = embedded builtin face, tier② = PIF1, tier③ = nullptr (self).
+  // Kept separate from pushFallback_ so PUSH/FAST config is never overwritten.
+  pushembedfont::FallbackContext sdTtfFallback_;
 
   // Reader-font faces at other sizes (share ttfSources_).
   struct TtfVariant {

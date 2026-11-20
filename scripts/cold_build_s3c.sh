@@ -22,7 +22,20 @@ echo "  SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH OK"
 
 echo "[3/5] pio run -e eego_a4 (jobs=3 to stay under cgroup 8GB cap)"
 # nproc=32 but the sandbox cgroup caps RAM at 8GB; 32 parallel cc1plus get OOM-killed.
-pio run -e eego_a4 -j 3
+# Route pio output through tee to a log and assert the REAL pio exit code via
+# PIPESTATUS[0]. A bare `pio ... | tail` in a CALLER hides a failed build behind
+# tail's rc=0; we fail loudly here so a build can never be mistaken for SUCCESS.
+# Callers wrapping this script in a pipe MUST likewise use ${PIPESTATUS[0]}.
+PIO_LOG="${OUT}/pio_build.log"
+mkdir -p "$OUT"
+set +e
+pio run -e eego_a4 -j 3 2>&1 | tee "$PIO_LOG"
+PIO_RC=${PIPESTATUS[0]}
+set -e
+if [ "$PIO_RC" -ne 0 ]; then
+  echo "FATAL: pio run FAILED (real exit code $PIO_RC; see $PIO_LOG)"; exit "$PIO_RC"
+fi
+echo "  pio run real exit code = $PIO_RC OK"
 
 echo "[4/5] archive 4 segments -> $OUT"
 mkdir -p "$OUT"

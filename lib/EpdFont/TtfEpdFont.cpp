@@ -773,6 +773,36 @@ bool TtfEpdFont::getAdvance(const uint32_t cp, const uint8_t style, uint16_t& ad
   return true;
 }
 
+// S3c-plus2: primary-only advance probe (see header). Deliberately does NOT
+// consult advanceHandler_ / secondary_ and does NOT rasterize or write a table:
+// it is safe to call from another face's fallback handler without any risk of
+// re-entering this face's own handler chain.
+bool TtfEpdFont::primaryAdvanceOnly(const uint32_t cp, const uint8_t style, uint16_t& adv12_4) {
+  if (style >= 4 || !loaded_) return false;
+  Face& f = faces_[style];
+  if (!f.inited || (master_ && !master_->faces_[style].ready)) initFace(f);
+  if (!f.ready) return false;
+  // Own persistent table first (zero FreeType work).
+  {
+    const auto it = std::lower_bound(f.advances.begin(), f.advances.end(), cp,
+                                     [](const Face::AdvanceEntry& e, uint32_t c) { return e.cp < c; });
+    if (it != f.advances.end() && it->cp == cp) {
+      adv12_4 = it->adv12_4;
+      return true;
+    }
+  }
+  // Own cmap: ONE metrics load, no render, no handler call.
+  const size_t faceIdx = static_cast<size_t>(&f - faces_);
+  FaceLock lock(master_ ? master_ : this, faceIdx);
+  const freeink::font::FtFont::GlyphId gid = f.ft->glyphId(cp);
+  if (gid == 0) return false;  // primary cmap miss — let caller try next tier
+  freeink::font::FtFont::GlyphMetrics gm;
+  if (!f.ft->metricsGlyph26_6(gid, size26_6_, gm)) return false;
+  const int32_t adv = fp4::truncate26_6_to_4(gm.advance26_6);
+  adv12_4 = static_cast<uint16_t>(adv < 0 ? 0 : adv);
+  return true;
+}
+
 const EpdGlyph* TtfEpdFont::injectGlyph(const uint8_t style, const uint32_t cp, const uint8_t w, const uint8_t h,
                                         const uint8_t* bmp2bit, const uint16_t bytes, const int32_t adv12_4,
                                         const int16_t left, const int16_t top) {

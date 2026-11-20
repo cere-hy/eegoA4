@@ -8,6 +8,7 @@
 #include <MinizConfig.h>  // renamed tinfl API + vendored miniz.h
 
 #include "Pif1Codec.h"
+#include "FallbackChain.h"
 
 #include <algorithm>
 #include <atomic>
@@ -53,6 +54,20 @@ inline uint8_t cov1bit(uint8_t a) { return a < 128 ? 0 : 1; }
 bool secondary(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font) {
   FallbackContext* c = static_cast<FallbackContext*>(ctx);
 
+  // S3c-plus2 tier ①: builtin.ttf VECTOR glyph, for SD-vector faces only.
+  // `rasterizedBitmap` uses builtinFace's OWN cmap and does NOT call its
+  // secondary_ (TtfEpdFont.cpp:630), so there is no recursion back into this
+  // SD face. Copy the packed bitmap into `font`'s arena via injectGlyph.
+  if (c && c->builtinFace) {
+    uint8_t w = 0, h = 0; uint16_t bytes = 0; int32_t adv = 0; int16_t left = 0, top = 0;
+    const uint8_t* bmp = c->builtinFace->rasterizedBitmap(cp, w, h, bytes, adv, left, top, style < 4 ? style : 0);
+    if (bmp && bytes && w <= 72 && h <= 72 &&
+        font.injectGlyph(style, cp, w, h, bmp, bytes, adv, left, top)) {
+      ++c->stats.sdHits;  // builtin-vector tier shares the counter bucket
+      return true;
+    }
+  }
+
   // Tier ②: PIF1 Han bitmap.
   if (g_reader) {
     uint8_t rec[kPif1Record];
@@ -95,7 +110,9 @@ bool secondary(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font) {
   }
 
   // Tier ③: SD full font (LXGW) for GB2312-outside codepoints. Per-face pointer.
-  if (c && c->sdFont) {
+  // Shared self-reference guard: an SD-vector face must never call itself here
+  // (would recurse); PUSH/FAST point at ttf_ (a different face) and are allowed.
+  if (c && fallbackchain::sdFontAllowed(c->sdFont != nullptr, c->sdFont == &font)) {
     uint8_t w = 0, h = 0; uint16_t bytes = 0; int32_t adv = 0; int16_t left = 0, top = 0;
     const uint8_t* bmp = c->sdFont->rasterizedBitmap(cp, w, h, bytes, adv, left, top, style < 4 ? style : 0);
     if (bmp && bytes && w <= 72 && h <= 72 && font.injectGlyph(style, cp, w, h, bmp, bytes, adv, left, top)) {
@@ -124,13 +141,20 @@ bool secondary(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font) {
 // Advance-only query. Mirrors secondary()'s tier order but touches NO bitmap.
 bool advanceOnly(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font, uint16_t& adv12_4) {
   FallbackContext* c = static_cast<FallbackContext*>(ctx);
+  // S3c-plus2 tier ①: builtin.ttf VECTOR advance, SD-vector faces only.
+  // primaryAdvanceOnly() touches only builtinFace's cmap/table — NEVER its
+  // advanceHandler_ — so it cannot recurse back into this SD face's chain.
+  // It also never rasterizes, preserving advance-only (zero-rasterize measure).
+  if (c && c->builtinFace && c->builtinFace->primaryAdvanceOnly(cp, style < 4 ? style : 0, adv12_4)) return true;
   // Tier ②: PIF1 Han bitmap — advance straight from record[4].
   if (g_reader) {
     const int px = pif1PxFromEmPx(font.family().getSizeInPixels());
     if (pif1AdvanceOnly(*g_reader, cp, px, adv12_4)) return true;
   }
   // Tier ③: SD full font (LXGW) — per-face pointer, its own advance path.
-  if (c && c->sdFont && c->sdFont->getAdvance(cp, style < 4 ? style : 0, adv12_4)) return true;
+  // Same self-reference guard as secondary(): no recursion for SD-vector faces.
+  if (c && fallbackchain::sdFontAllowed(c->sdFont != nullptr, c->sdFont == &font) &&
+      c->sdFont->getAdvance(cp, style < 4 ? style : 0, adv12_4)) return true;
   // Tier ④: no source has an advance for this codepoint.
   return false;
 }
@@ -169,6 +193,19 @@ void installGlobalFallback(EpdFontData& data) {
 
 void setSdFallback(FallbackContext& ctx, TtfEpdFont* font) { ctx.sdFont = font; }
 
+void installSdVectorFallback(TtfEpdFont& font, FallbackContext& ctx, TtfEpdFont& builtinFace) {
+  // Tier ① builtin vector; tier ② PIF1; tier ③ intentionally DISABLED (the
+  // face itself is the user's SD choice — self-reference is a no-op and any
+  // callback would recurse). Do NOT inherit pushFallback_.sdFont here.
+  ctx.builtinFace = &builtinFace;
+  ctx.sdFont = nullptr;
+  ctx.stats = Stats{};
+  ctx.cjkSeen = ctx.cjkMissing = 0;
+  ctx.unavailable = &g_unavailable;
+  font.setSecondaryHandler(&secondary, &ctx);
+  font.setAdvanceHandler(&advanceOnly, &ctx);
+}
+
 void installInto(TtfEpdFont& pushFont, FallbackContext& ctx) {
   if (!g_reader) {
     const size_t viewSize = uihanzi_bin_end - uihanzi_bin_start;
@@ -182,6 +219,7 @@ void installInto(TtfEpdFont& pushFont, FallbackContext& ctx) {
     }
     if (!g_reader) LOG_ERR("PFNT", "PIF1 init failed: bin=%d buf=%d", g_view.valid() ? 1 : 0, g_blockBuf ? 1 : 0);
   }
+  ctx.builtinFace = nullptr;  // PUSH/FAST are themselves the builtin primary — never tier① into self
   ctx.stats = Stats{};
   ctx.cjkSeen = ctx.cjkMissing = 0;
   ctx.unavailable = &g_unavailable;
