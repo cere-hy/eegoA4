@@ -77,6 +77,13 @@ class HalStorage {
 
   static HalStorage& getInstance() { return instance; }
 
+  // S3cPF7: I/O-lock adapter handed to the USB MSC callbacks. Static so it can
+  // live in the singleton's private mutex; take=true acquires, false releases.
+  // The usbd task takes AND gives within one callback (RAII), so recursive
+  // mutex ownership asserts stay valid. Available on every build; a no-op-safe
+  // false when the mutex is not yet created.
+  static bool usbMscLockFn(void* ctx, bool take);
+
   class StorageLock;  // private class, used internally
 
  private:

@@ -18,6 +18,21 @@ freeink::UsbMassStorage usbMassStorage;
 #endif
 }  // namespace
 
+// S3cPF7: lock adapter injected into the MSC callbacks. It takes/gives the
+// HalStorage recursive mutex from whichever task/core the callback runs on.
+// Recursive take/give is ownership-safe: the usbd task takes it and the same
+// usbd task gives it (RAII guard in mscRead/mscWrite), so
+// pxCurrentTCBs[xPortGetCoreID()] sees the owning task on give — no
+// "non-owner give" / xTaskPriorityDisinherit assert. The mutex TYPE is
+// unchanged (xSemaphoreCreateRecursiveMutex).
+bool HalStorage::usbMscLockFn(void* /*ctx*/, bool take) {
+  auto* mtx = instance.storageMutex;
+  if (!mtx) return false;
+  if (take) return xSemaphoreTakeRecursive(mtx, portMAX_DELAY) == pdTRUE;
+  xSemaphoreGiveRecursive(mtx);
+  return true;
+}
+
 HalStorage HalStorage::instance;
 
 HalStorage::HalStorage() {
@@ -59,7 +74,9 @@ bool HalStorage::beginUsbDrive() {
     return false;
   }
 
-  if (!usbMassStorage.begin(blockDevice)) {
+  // S3cPF7: inject the shared-storage lock into every MSC callback so read10/
+  // write10 serialize with the core-1 SD readers on the SAME recursive mutex.
+  if (!usbMassStorage.begin(blockDevice, &HalStorage::usbMscLockFn, nullptr)) {
     LOG_ERR("USB", "USB Drive MSC initialization failed");
     if (!SDCard.begin()) {
       LOG_ERR("USB", "Unable to remount SD card after USB Drive startup failure");
