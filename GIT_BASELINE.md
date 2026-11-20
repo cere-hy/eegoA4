@@ -153,3 +153,13 @@
 - 内置耗时根因：secondary() tier④ 失败不缓存，缺失码点每次出现/每次翻页重跑 builtin→PIF1→SD 三级栅格化并打 PFNT 日志（O(出现次数)超线性）。修：FallbackContext 加 256 容量已确认缺失码点集合，secondary()/advanceOnly() 入口 isMissing 短路，tier④ markMissing 首次才打日志；face重建/setSdFallback 变更时 resetMissing。header +30 / cpp +31 行，不动 TtfEpdFont/阅读器。命中字零改动故 2640B(840ms)零回归；6236B 预期降到2秒级属机制预期，端到端待真机复测(不编造)
 - host 15/15 全绿（PushThumb 40→71 checks、新增 MissingCache 14 checks）
 - 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf5_factory.bin`（待真机验收）
+
+## S3cPF6 — PUSH mtime 源头修复 + 封面时间统一 + FontMap（b65-s3c-pf6，2026-11-20）
+- 主仓 commit `3c38c25c`（13 文件 / +765 / −16；前基线 `397ae080`）；FtFont 子模块本地 commit `685ffdb`（unitsToAdvance26_6）
+- app sha256 `7b411506359e4f224fd64197da92bd45e4b36152a3ba81898310c0d1d06aa01e`（6,030,240 B）
+- factory sha256 `9fd4bfd373cfc2150c9dfab4b2a2d5f7e4f33beda529e430b71b37ee24456c69`（6,095,776 B；factory−app=65,536）
+- A 级双冷编：四产物逐字节 MATCH，epoch=1794813449，真实退出码 0（两次），双删各 1 次
+- 阶段一根因：SdFat 未注册 dateTimeCallback，新文件盖 FS_DEFAULT_DATE=FS_DATE(compileYear,1,1)=2026-01-01；bmp 读 std::time RTC(正确)、矢量读 mtime(错误)。修：HalFile::setModificationTime；PushTextSink 一次捕获 PushInstant 同传给 mtime 盖章与 bmp 烘焙，两路径严格同源=推送时刻 RTC；缓存失效走 dirty marker 未受影响
+- 阶段二 FontMap：epd::FontMap 加载期解析 cmap(f4/f12)+hmtx→BMP 位图存在标记+稠密 advance(2B/码点)；LXGW 42220 码点=91.0KiB(<100KiB)，supp 2590 走 fallback。缓存 /.crosspoint/fontmap/<fnv(path)_mtime_size>.fmap，损坏忽略重建。TtfEpdFont::getAdvance 热表 miss 后查 map，经 FtFont::unitsToAdvance26_6(FT_MulFix x_scale) 换算，与 FreeType 字节一致(host 三档字号各100码点 diff=0 + probe 400 diff=0)。内置/PUSH face 不挂 map 零回归。AdvanceTable.h/FallbackChain.h 零改动
+- host 16 套全绿（FontMap 新套 12×2；PushThumb 71→75 含 4 条时间断言）
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf6_factory.bin`（待真机验收）
