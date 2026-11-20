@@ -175,6 +175,12 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
   };
   SETTINGS.fastFontResolverCtx = this;
 
+  // S3c+++: build the three resident built-in UI variants and establish the
+  // terminal fallback chain BEFORE any SD font load, so setupUiFallbacks /
+  // setupTtfUiFallbacks relink against live builtin ids. With no SD font this
+  // is the final chain: ubuntu → builtin (8/10/12pt) → placeholder.
+  setupBuiltinUiFallbacks(renderer);
+
   // If user has a saved SD font selection, load it
   if (SETTINGS.sdFontFamilyName[0] != '\0') {
     const auto* family = registry_.findFamily(SETTINGS.sdFontFamilyName);
@@ -294,6 +300,68 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   }
 }
 
+void SdCardFontSystem::setupBuiltinUiFallbacks(GfxRenderer& renderer) {
+#if CROSSPOINT_VECTOR_FONTS
+  // Build each built-in UI size ONCE from the resident builtin.ttf. These faces
+  // are the terminal fallback of the UI string-level chain: their primary is
+  // builtin.ttf (1126 common Han glyphs), and installInto() adds the mature
+  // secondary chain (PIF1 bitmap → SD tier③ → placeholder) for any codepoint
+  // the cmap lacks. Identical construction to the PUSH/FAST face, so no new
+  // fallback logic — only new sized instances. A 16 KB / 384-glyph cache per
+  // variant is ample for short UI strings (titles/rows), ~48 KB total.
+  for (size_t i = 0; i < std::size(kUiFontSizes); ++i) {
+    if (builtinUi_[i]) continue;  // resident: idempotent
+    const auto& ui = kUiFontSizes[i];
+    auto f = makeUniqueNoThrow<TtfEpdFont>();
+    if (!f) {
+      LOG_ERR("SDFS", "OOM: TtfEpdFont for builtin UI fallback @%upt", ui.pointSize);
+      continue;
+    }
+    f->addResidentSource(TtfEpdFont::Regular, pushembedfont::builtinTtfData(),
+                         static_cast<uint32_t>(pushembedfont::builtinTtfLen()));
+    if (!f->load(ui.pointSize, /*twoBit=*/true, /*glyphCacheBytes=*/16 * 1024, /*maxGlyphs=*/384)) {
+      LOG_ERR("SDFS", "builtin UI fallback load failed @%upt", ui.pointSize);
+      continue;
+    }
+    f->build(" ");
+    // Own ctx per variant: builtinFace=nullptr (this face IS the builtin
+    // primary), sdFont=nullptr (tier③ off — the string-level chain already
+    // tried the user's SD font in tier② before reaching here).
+    pushembedfont::installInto(*f, builtinUiCtx_[i]);
+    const int id = computeTtfFontId((std::string("\x01builtin_ui") + char(ui.pointSize)).c_str(), ui.pointSize);
+    renderer.insertFont(id, f->family());
+    renderer.registerTtfFont(id, f.get());
+    builtinUiIds_[i] = id;
+    builtinUi_[i] = std::move(f);
+    LOG_DBG("SDFS", "builtin UI fallback @%upt ready (id %d)", ui.pointSize, id);
+  }
+  relinkUiFallbacks(renderer);
+#endif  // CROSSPOINT_VECTOR_FONTS
+}
+
+void SdCardFontSystem::relinkUiFallbacks(GfxRenderer& renderer) {
+#if CROSSPOINT_VECTOR_FONTS
+  // Chain topology (device + host share UiFallbackChain.h decision logic):
+  //   ubuntu (primary) → sdUiIds_[i] (if any) → builtinUiIds_[i] → end
+  // Rebuilt from scratch after any SD font load/unload so a stale SD id can
+  // never dangle in the map. setFallbackFont is idempotent (map assignment).
+  renderer.clearFallbackFonts();  // one-shot: 3-entry map, clears all stale links
+  for (size_t i = 0; i < std::size(kUiFontSizes); ++i) {
+    const int primary = kUiFontSizes[i].fontId;
+    const int builtin = builtinUiIds_[i];
+    const int sd = sdUiIds_[i];
+    if (sd != 0) renderer.setFallbackFont(primary, sd);
+    if (builtin != 0) {
+      if (sd != 0) {
+        renderer.setFallbackFont(sd, builtin);       // tier② → tier③
+      } else {
+        renderer.setFallbackFont(primary, builtin);  // no SD: builtin is tier②
+      }
+    }
+  }
+#endif  // CROSSPOINT_VECTOR_FONTS
+}
+
 void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   const std::string& familyName = manager_.currentFamilyName();
   if (familyName.empty()) return;  // no SD family loaded — nothing to fall back to
@@ -338,16 +406,17 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
     return;
   }
 
-  for (const auto& ui : kUiFontSizes) {
+  for (size_t i = 0; i < std::size(kUiFontSizes); ++i) {
+    const auto& ui = kUiFontSizes[i];
     // Use the persisted CSS variant id so UI and reader text share one prewarm set.
     const int id = variantFontId(manager_.getFontId(familyName), ui.pointSize);
     const int sdFontId = manager_.loadFamilyExtraSize(*family, renderer, ui.pointSize, id);
-    if (sdFontId != 0) {
-      renderer.setFallbackFont(ui.fontId, sdFontId);
-    } else {
+    sdUiIds_[i] = sdFontId;  // S3c+++: remember for chain relink
+    if (sdFontId == 0) {
       LOG_DBG("SDFS", "No %u pt SD glyphs for UI fallback in %s", ui.pointSize, familyName.c_str());
     }
   }
+  relinkUiFallbacks(renderer);  // S3c+++: ubuntu → SD → builtin → end
 }
 
 int SdCardFontSystem::variantFontId(const int readerFontId, const uint8_t pointSize) {
@@ -366,6 +435,10 @@ int SdCardFontSystem::variantFontId(const int readerFontId, const uint8_t pointS
 void SdCardFontSystem::unloadCpfonts(GfxRenderer& renderer) {
   cpfontVariants_.clear();  // the manager owns and frees the fonts themselves
   manager_.unloadAll(renderer);
+  // S3c+++: cpfont UI fallbacks are gone; drop stale ids and relink back to
+  // the resident built-in variants. Idempotent if a reload follows immediately.
+  for (int& id : sdUiIds_) id = 0;
+  relinkUiFallbacks(renderer);
 }
 
 int SdCardFontSystem::resolveVariant(const int fontId, const float scale) {
@@ -537,7 +610,11 @@ void SdCardFontSystem::unloadTtf(GfxRenderer& renderer) {
   }
   ttfUiIds_.clear();
   ttfUi_.clear();
-  renderer.clearFallbackFonts();
+  // S3c+++: drop stale SD UI ids, then relink the chain back to the resident
+  // built-in variants (ubuntu → builtin → placeholder) so UI Han keeps working
+  // with the SD vector font unloaded.
+  for (int& id : sdUiIds_) id = 0;
+  relinkUiFallbacks(renderer);
   if (ttfFontId_ != 0) {
     renderer.unregisterTtfFont(ttfFontId_);
     renderer.removeFont(ttfFontId_);  // drop from the renderer's fontMap
@@ -626,7 +703,11 @@ void SdCardFontSystem::setupTtfUiFallbacks(GfxRenderer& renderer) {
   // variant of ttf_, sharing its FreeType faces without parsing font files or
   // allocating separate FT_Face objects in DRAM.
   static constexpr size_t kUiFallbackMinInternalHeap = 24 * 1024;
-  for (const auto& ui : kUiFontSizes) {
+  // S3c+++: reset per-size SD ids first — a size skipped this pass must not
+  // inherit a stale id from a previous family/size.
+  for (int& id : sdUiIds_) id = 0;
+  for (size_t i = 0; i < std::size(kUiFontSizes); ++i) {
+    const auto& ui = kUiFontSizes[i];
     if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) == 0) {
       const size_t internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
       if (internalFree < kUiFallbackMinInternalHeap) {
@@ -650,10 +731,11 @@ void SdCardFontSystem::setupTtfUiFallbacks(GfxRenderer& renderer) {
     const int id = computeTtfFontId((ttfFamily_ + "\x01ui").c_str(), ui.pointSize);
     renderer.insertFont(id, f->family());
     renderer.registerTtfFont(id, f.get());
-    renderer.setFallbackFont(ui.fontId, id);
+    sdUiIds_[i] = id;  // S3c+++: remember for chain relink
     ttfUiIds_.push_back(id);
     ttfUi_.push_back(std::move(f));
   }
+  relinkUiFallbacks(renderer);  // S3c+++: ubuntu → SD → builtin → end
 }
 
 void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRenderer& renderer,

@@ -173,6 +173,23 @@ class SdCardFontSystem {
   // Kept separate from pushFallback_ so PUSH/FAST config is never overwritten.
   pushembedfont::FallbackContext sdTtfFallback_;
 
+  // S3c+++: three RESIDENT built-in UI variants (8/10/12pt) built from
+  // builtin.ttf with the same PIF1/placeholder secondary chain as PUSH. They
+  // are the last-resort tier of the UI string-level fallback chain, so UI Han
+  // never shows empty boxes when no SD font (or a Latin-only SD font) is
+  // installed. Built once, kept for the process lifetime (UI sizes are fixed).
+  std::unique_ptr<TtfEpdFont> builtinUi_[3];
+  pushembedfont::FallbackContext builtinUiCtx_[3];
+  int builtinUiIds_[3] = {0, 0, 0};
+  // Per-size SD UI fallback id currently registered (0 = none). Lets the chain
+  // be relinked deterministically after SD font load/unload without reading
+  // GfxRenderer's private map. Parallel to kUiFontSizes.
+  int sdUiIds_[3] = {0, 0, 0};
+  // Build the three resident variants once, then (re)link every UI fallback
+  // chain: ubuntu → SD (if any) → builtin variant → end. Idempotent.
+  void setupBuiltinUiFallbacks(GfxRenderer& renderer);
+  void relinkUiFallbacks(GfxRenderer& renderer);
+
   // Reader-font faces at other sizes (share ttfSources_).
   struct TtfVariant {
     int fontId;

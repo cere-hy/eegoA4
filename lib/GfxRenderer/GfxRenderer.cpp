@@ -1,4 +1,5 @@
 #include "GfxRenderer.h"
+#include "UiFallbackChain.h"  // S3c+++ UI fallback chain (device/host 同码)
 
 #include <BidiUtils.h>
 #include <BoardConfig.h>
@@ -282,30 +283,40 @@ int GfxRenderer::resolveTextFontId(const int fontId, const char* text, const Epd
   if (fallbackFontMap_.empty() || text == nullptr || *text == '\0') {
     return fontId;
   }
-  const auto fbIt = fallbackFontMap_.find(fontId);
-  if (fbIt == fallbackFontMap_.end()) {
-    return fontId;  // no fallback registered for this font
-  }
-  const int fallbackFontId = fbIt->second;
   const auto fontIt = fontMap.find(fontId);
-  const auto fallbackIt = fontMap.find(fallbackFontId);
-  if (fontIt == fontMap.end() || fallbackIt == fontMap.end()) {
-    return fontId;  // unknown primary or fallback not loaded — let the caller handle it
+  if (fontIt == fontMap.end()) {
+    return fontId;  // unknown primary — let the caller handle it
   }
   const EpdFontFamily& primary = fontIt->second;
-  const EpdFontFamily& fallback = fallbackIt->second;
+
+  // S3c+++ chained fallback (方案 a). fallbackFontMap_ now forms a chain:
+  //   ubuntu bitmap (primary) → SD user font (if installed) → built-in TTF UI
+  //   variant → end. Redirect on the first non-ASCII codepoint the primary
+  //   cannot draw, then walk the chain for the first font that CAN. If no tier
+  //   covers the codepoint, land on the chain terminal (the built-in variant,
+  //   whose PIF1 bitmap + placeholder tiers cover any codepoint) so UI Han
+  //   never falls back to the bitmap font's empty boxes.
+  // Whole-string switch semantics are unchanged. ASCII stays on the primary
+  // fast path, so pure-English titles never redirect (no visual regression).
+  // The next/covers decisions live in UiFallbackChain.h — the SAME header the
+  // host test compiles — so device and host cannot drift apart.
   const char* cursor = text;
   uint32_t cp;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&cursor)))) {
-    // Redirect whenever the primary font cannot draw a codepoint the fallback
-    // can — otherwise the string renders with holes. Not just CJK: Greek,
-    // Cyrillic, or any script the built-in UI fonts lack qualifies. ASCII is
-    // skipped outright (every registered font covers it), keeping Latin
-    // strings on the fast path, and a partial-coverage fallback is not worth
-    // dragging the whole string into for glyphs it would also miss.
-    if (cp >= 0x80 && !primary.hasCodepoint(cp, style) && fallback.hasCodepoint(cp, style)) {
-      return fallbackFontId;
-    }
+    if (!uifallbackchain::needsFallback(cp, primary.hasCodepoint(cp, style))) continue;
+    const int chosen = uifallbackchain::resolveChain(
+        fontId, cp,
+        /*nextFallback=*/[this](const int cur, int& out) {
+          const auto it = fallbackFontMap_.find(cur);
+          if (it == fallbackFontMap_.end() || it->second == 0) return false;
+          out = it->second;
+          return true;
+        },
+        /*covers=*/[this, style](const int id, const uint32_t codepoint) {
+          const auto it = fontMap.find(id);
+          return it != fontMap.end() && it->second.hasCodepoint(codepoint, style);
+        });
+    if (chosen != fontId) return chosen;  // whole-string switch (unchanged)
   }
   return fontId;
 }
