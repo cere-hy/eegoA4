@@ -129,3 +129,17 @@
 - D2 日志：effectiveReaderFontId 单出口打 [ERS] reader font: book/mode/fontId；ensurePushFont 重建分支打 [SDFS] push face rebuilt: pt/reason。仅观测，不动耗时/缓存逻辑
 - host 15/15 全绿；验收核心：①-⑦ D1 可达与交互、⑧-⑫ 图标与网格、⑬-⑭ 日志、⑮-⑯ 不回归与三主题
 - 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf3_factory.bin`（待真机验收，非日常用件）
+
+## S3cPF4 (b65-s3c-pf4) 指纹
+
+- commit `0dd0e0a7`（5 文件 / +75 / −30；前一干净基线 `edcc07d0`）
+- app sha256 `d8fa3923fa7ff8171d94a022e7534cebec96b17a40ea0e558713845fcb789a0a`（6,021,984 B）
+- factory sha256 `b185b99e7503bdad68164adb712a5f03a906aca613c95549cb70205d646a421a`（6,087,520 B；factory−app=65,536）
+- A 级双冷编：app/factory/elf/MANIFEST 四产物逐字节 IDENTICAL，A_LEVEL_CLOSURE=PASS，epoch=1794813449，真实退出码 0（两次）
+- 图标方向：pf3 对 push.h 做了多余的"逆drawIcon预变换"致真机马桶塞；pf4 按视觉 row/col 直接编码（与 folder.h 同约定，无预变换），字符画+实际尺寸对比图验证箭尖朝下/U口朝上、2px描边对齐、三点留白可辨。注意该图标上下对称，flipUD 无效
+- 网格入口：根因=pf3 的 append 只在 if(coverGridUi) 分支，LYRA_3_COVERS/Lyra/Classic/RoundedRaff 走独立主题、coverGridUi==nullptr 从不执行。pf4 新增 ensurePushHomeTile(displaySlots)，所有主题 onEnter 都确保 PUSH 虚拟书入列（末格），点击走 onRecentBookSelected→goToReader("/PUSH.txt")
+- 各主题 PUSH 封面：根因=PUSH 封面只由 PushThumb 生成固定 thumb_400.bmp，RecentBook 路径带 [HEIGHT] 占位符被主题替换成 226/300 → 请求不存在的 thumb_226/300.bmp → 退化为书本占位。pf4 在 ensurePushHomeTile 里把 PUSH 路径 pin 成 thumb_400.bmp（getThumbBmpPath(400)，无占位符），所有主题 getCoverThumbPath no-op、加载同一封面并各自 drawCoverThumbFill 居中裁切。经典布局/各主题绘制零改动，不新增落盘 bmp
+- 日志去重：[ERS] reader font 从 4 个热路径调用（620ms~50条，115200baud 阻塞串口约250ms）；新增 mutable ReaderFontLogKey 三元组(book/mode/fontId)，仅变化时打印，翻10页≤2条，日志本身保留。Idle prewarm 两条内容随页变化不属刷屏，未动
+- 速度评估(P2只答未优化)：37969B mode=0 的 parse ms 日志被用户截断无法给实测(不编造)；4.2ms/字线性外推是上界(重复字命中 per-face advance 表近乎零成本)；日志去重约省 250ms 量级；advance 预热是迁移成本非消除，先复测再定
+- host 15/15 全绿；验收核心：①-② 图标方向/对比图、③-④ 网格PUSH格封面、⑤-⑥ 日志去重、⑦-⑧ 不回归与大字/时间可读
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf4_factory.bin`（待真机验收，非日常用件）
