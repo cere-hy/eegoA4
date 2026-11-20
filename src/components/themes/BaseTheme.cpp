@@ -12,9 +12,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 #include <BlePushGatt.h>
+#include <PushThumb.h>  // S3cPF5: rect-driven vector PUSH cover
 
 #include "I18n.h"
 #include "RecentBooksStore.h"
@@ -153,6 +155,65 @@ bool BaseTheme::drawCoverThumbFill(const GfxRenderer& renderer, const Bitmap& bi
   const bool drawn = renderer.drawBitmap(bitmap, x, y, bitmap.getWidth(), bitmap.getHeight());
   renderer.setClipRect(clip[0], clip[1], clip[2], clip[3]);
   return drawn;
+}
+
+// ---- S3cPF5: rect-driven vector PUSH cover ---------------------------------
+namespace {
+constexpr const char* kPushCoverPath = "/PUSH.txt";
+
+// Decode FAT date/time pair (as stored by HalFile::modificationTime) into a
+// "YYYY-MM-DD HH:MM" ASCII string. Mirrors the format PushTextSink writes into
+// the legacy cover, so the vector redraw shows the same push time.
+void fatTimeToText(uint32_t packed, char out[17]) {
+  if (packed == 0) {
+    std::snprintf(out, 17, "0000-00-00 00:00");
+    return;
+  }
+  const uint16_t date = static_cast<uint16_t>(packed >> 16);
+  const uint16_t tim = static_cast<uint16_t>(packed & 0xFFFF);
+  const int year = 1980 + ((date >> 9) & 0x7F);
+  const int mon = (date >> 5) & 0x0F;
+  const int day = date & 0x1F;
+  const int hour = (tim >> 11) & 0x1F;
+  const int min = (tim >> 5) & 0x3F;
+  std::snprintf(out, 17, "%04d-%02d-%02d %02d:%02d", year, mon, day, hour, min);
+}
+
+// Ink callback: set a single logical pixel through the renderer. Coordinates
+// arrive already translated to absolute screen space by renderCoverInRect,
+// and the renderer applies the display orientation in drawPixel().
+void pushCoverInk(void* ctx, int x, int y, bool state) {
+  static_cast<GfxRenderer*>(ctx)->drawPixel(x, y, state);
+}
+}  // namespace
+
+bool BaseTheme::drawPushCoverInRect(GfxRenderer& renderer, const RecentBook& book, Rect slot, const int xOffset) {
+  if (book.path != kPushCoverPath || slot.width <= 0 || slot.height <= 0) return false;
+
+  // PUSH metadata: byte count = actual PUSH.txt size; time = its FAT mtime.
+  // Both match what PushTextSink baked into the legacy thumb_400.bmp.
+  size_t byteCount = 0;
+  char timeText[17] = "0000-00-00 00:00";
+  HalFile file;
+  if (Storage.openFileForRead("HOME", kPushCoverPath, file)) {
+    byteCount = file.fileSize();
+    fatTimeToText(file.modificationTime(), timeText);
+    file.close();
+  }
+  pushthumb::CoverInfo info{timeText, byteCount};
+
+  // Paint the card's white background first; renderCoverInRect only emits ink.
+  // Clip to the slot so no stroke escapes the card border (defence in depth:
+  // the library already clips, this guards the white fill on dark themes).
+  const auto clip = renderer.getClipRect();
+  const int left = std::max(slot.x, clip[0]);
+  const int top = std::max(slot.y, clip[1]);
+  renderer.setClipRect(left, top, std::max(0, std::min(slot.x + slot.width, clip[0] + clip[2]) - left),
+                       std::max(0, std::min(slot.y + slot.height, clip[1] + clip[3]) - top));
+  renderer.fillRect(slot.x, slot.y, slot.width, slot.height, false);
+  pushthumb::renderCoverInRect(&renderer, pushCoverInk, slot.x + xOffset, slot.y, slot.width, slot.height, info);
+  renderer.setClipRect(clip[0], clip[1], clip[2], clip[3]);
+  return true;
 }
 
 void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const size_t current, const size_t total) {

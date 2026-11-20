@@ -227,7 +227,16 @@ void LyraTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       std::string coverPath = book.coverBmpPath;
       bool hasCover = true;
       int tileX = rect.x + LyraMetrics::values.contentSidePadding;
-      if (coverPath.empty()) {
+      // S3cPF5: PUSH is drawn as vector art into THIS card's rect. The old
+      // 240x400 bmp was centre-cropped into the ~135x226 slot, cutting "P"
+      // and the date. Non-PUSH books keep the bmp path verbatim.
+      const bool pushDrawn = drawPushCoverInRect(
+          renderer, book,
+          Rect{tileX + hPaddingInSelection, tileY + hPaddingInSelection, coverWidth,
+               LyraMetrics::values.homeCoverHeight});
+      if (pushDrawn) {
+        hasCover = true;
+      } else if (coverPath.empty()) {
         hasCover = false;
       } else {
         const std::string coverBmpPath = UITheme::getCoverThumbPath(coverPath, LyraMetrics::values.homeCoverHeight);

@@ -10,25 +10,33 @@
 namespace pushthumb {
 namespace {
 
-// Canvas: 1 bit per pixel, white=1 (background), black=0 (ink).
-// Row stride equals the BMP file stride (4-byte aligned): (240+31)/32*4 = 32 B.
-// fillWhite covers all stride*H bytes (padding included, white); setBlack indexes
-// y*stride+x/8. BottomUp BMP output emits rows H-1..0.
+// Canvas paints into either a packed 1-bit BMP row buffer (legacy
+// writeCoverBmp) or an arbitrary rectangle through an ink-pixel callback
+// (renderCoverInRect, S3cPF5). Local coordinates (0..w, 0..h) are translated
+// to absolute pixels: BMP indexing for the buffer, (ox+lx, oy+ly) for ink.
+// Ink pixels are black; setWhite is a no-op in callback mode because the
+// caller paints the card's white background before invoking us.
 struct Canvas {
-  uint8_t* bits;
-  int w, h, stride;
-  void setWhite(int x, int y) {
-    if (x < 0 || x >= w || y < 0 || y >= h) return;
-    bits[y * stride + (x >> 3)] |= static_cast<uint8_t>(0x80 >> (x & 7));
+  uint8_t* bits;      // BMP mode: row buffer; callback mode: nullptr
+  int w, h, stride;   // local size + BMP row stride
+  int ox, oy;         // absolute origin of local (0,0)
+  InkFn ink;          // callback mode only
+  void* inkCtx;
+
+  void setPixel(int lx, int ly, bool black) {
+    if (lx < 0 || lx >= w || ly < 0 || ly >= h) return;
+    if (bits) {
+      const int ax = ox + lx, ay = oy + ly;
+      uint8_t* p = bits + static_cast<size_t>(ay) * stride + (ax >> 3);
+      const uint8_t mask = static_cast<uint8_t>(0x80 >> (ax & 7));
+      if (black) *p &= static_cast<uint8_t>(~mask); else *p |= mask;
+    } else if (ink && black) {
+      ink(inkCtx, ox + lx, oy + ly, true);
+    }
   }
-  void setBlack(int x, int y) {
-    if (x < 0 || x >= w || y < 0 || y >= h) return;
-    bits[y * stride + (x >> 3)] &= static_cast<uint8_t>(~(0x80 >> (x & 7)));
-  }
-  void drawInk(int x, int y, uint8_t cov) {  // cov 0..255; >=128 -> black
-    if (cov >= 128) setBlack(x, y); else setWhite(x, y);
-  }
-  void clear() { std::memset(bits, 0xFF, static_cast<size_t>(stride) * h); }  // white background incl. padding
+  void setBlack(int x, int y) { setPixel(x, y, true); }
+  void drawInk(int x, int y, uint8_t cov) { setPixel(x, y, cov >= 128); }
+  void clear() { if (bits) std::memset(bits, 0xFF, static_cast<size_t>(stride) * h); }
 };
 
 // ---- Small text: 8x8 ASCII glyphs (MSB = leftmost). All cover strings ASCII. ----
@@ -63,26 +71,28 @@ const Glyph8* glyph8(char c) {
   for (const auto& g : kFont8) if (g.c == c) return &g;
   return glyph8(' ');
 }
-constexpr int kUsableW = 208;   // card 240 - 2*16 margin
-constexpr int kCenterX = 120;   // card midline
 
-// Exact 8x8 width at integer scale (advance = 8*scale per char).
-int textWidth8(const char* s, int scale) {
+// Exact integer-scale 8x8 text. advance = cell (8*scale) per char, centred on
+// the rect midline. `cell` is always a multiple of 8 so the legacy 240x400
+// output (scale 1/2/3) is bit-identical.
+int textWidth(const char* s, int cell) {
   if (!s) return 0;
-  return static_cast<int>(std::strlen(s)) * 8 * scale;
+  return static_cast<int>(std::strlen(s)) * cell;
 }
-// Largest integer scale in [1..3] whose width fits kUsableW; 0 = no fit.
-int fitScale8(const char* s) {
+// Largest integer scale in [1..3] whose width fits usableW; 0 = no fit.
+int fitScale(const char* s, int usableW) {
+  if (!s || !*s) return 1;
+  const int len = static_cast<int>(std::strlen(s));
   for (int scale = 3; scale >= 1; --scale)
-    if (textWidth8(s, scale) <= kUsableW) return scale;
+    if (len * 8 * scale <= usableW) return scale;
   return 0;
 }
-// Draw 8x8 text horizontally centered at kCenterX. Returns ink bbox in/out.
-struct BBox { int x, y, w, h; };
-BBox drawText8(Canvas& cv, const char* s, int yTop, int scale) {
-  const int tw = textWidth8(s, scale);
-  int x = kCenterX - tw / 2;
-  int minX = cv.w, maxX = -1, minY = cv.h, maxY = -1;
+// Draw 8x8 text with integer zoom `scale`, horizontally centred at cx.
+void drawText(Canvas& cv, const char* s, int yTop, int scale, int cx) {
+  if (!s || !*s || scale < 1) return;
+  const int cell = 8 * scale;
+  const int tw = textWidth(s, cell);
+  int gx = cx - tw / 2;
   for (const char* p = s; *p; ++p) {
     const Glyph8* g = glyph8(*p);
     for (int r = 0; r < 8; ++r) {
@@ -90,27 +100,14 @@ BBox drawText8(Canvas& cv, const char* s, int yTop, int scale) {
       for (int col = 0; col < 8; ++col) {
         if (!(row & (0x80 >> col))) continue;
         for (int sy = 0; sy < scale; ++sy)
-          for (int sx = 0; sx < scale; ++sx) {
-            const int px = x + col * scale + sx, py = yTop + r * scale + sy;
-            cv.setBlack(px, py);
-            if (px < minX) minX = px;
-            if (px > maxX) maxX = px;
-            if (py < minY) minY = py;
-            if (py > maxY) maxY = py;
-          }
+          for (int sx = 0; sx < scale; ++sx) cv.setBlack(gx + col * scale + sx, yTop + r * scale + sy);
       }
     }
-    x += 8 * scale;
+    gx += cell;
   }
-  if (maxX < 0) return {0, 0, 0, 0};
-  return {minX, minY, maxX - minX + 1, maxY - minY + 1};
 }
 
 // ---- Large "PUSH": vector strokes rasterised at target size (no integer zoom). ----
-// Each glyph is a list of axis-aligned strokes in an 8x8 em box. A stroke is
-// {x0,y0,x1,y1} centre-line endpoints; half-width kStrokeHW. Rasterisation
-// samples 2x2 sub-pixels per device pixel and sets ink at cov>=0.5, so edges
-// are computed for the TARGET size instead of replicating an 8x8 bitmap.
 struct Stroke { float x0, y0, x1, y1; };
 struct VecGlyph { char c; const Stroke* strokes; int n; };
 constexpr float kStrokeHW = 0.62f;
@@ -143,16 +140,16 @@ float distToStroke(float px, float py, const Stroke& s) {
   if (t < 0) t = 0; else if (t > 1) t = 1;
   const float cx = s.x0 + t * dx, cy = s.y0 + t * dy;
   const float ex = px - cx, ey = py - cy;
-  return ex * ex + ey * ey;  // squared distance
+  return ex * ex + ey * ey;
 }
-// Rasterise one vector glyph into canvas at (x,y) size (cell px).
-BBox drawVecGlyph(Canvas& cv, char ch, int x, int y, float cell) {
+// Rasterise one vector glyph; `cell` may be fractional (small-card scaling).
+void drawVecGlyph(Canvas& cv, char ch, int x, int y, float cell) {
   const VecGlyph* g = vecGlyph(ch);
-  if (!g) return {0, 0, 0, 0};
+  if (!g || cell < 1.0f) return;
   const float hw2 = kStrokeHW * kStrokeHW;
-  int minX = cv.w, maxX = -1, minY = cv.h, maxY = -1;
-  for (int py = 0; py < static_cast<int>(cell + 0.5f); ++py) {
-    for (int px = 0; px < static_cast<int>(cell + 0.5f); ++px) {
+  const int n = static_cast<int>(cell + 0.5f);
+  for (int py = 0; py < n; ++py) {
+    for (int px = 0; px < n; ++px) {
       int hits = 0;
       for (int sy = 0; sy < 2; ++sy)
         for (int sx = 0; sx < 2; ++sx) {
@@ -164,16 +161,8 @@ BBox drawVecGlyph(Canvas& cv, char ch, int x, int y, float cell) {
           if (inside) ++hits;
         }
       cv.drawInk(x + px, y + py, static_cast<uint8_t>(hits * 255 / 4));
-      if (hits >= 2) {
-        if (x + px < minX) minX = x + px;
-        if (x + px > maxX) maxX = x + px;
-        if (y + py < minY) minY = y + py;
-        if (y + py > maxY) maxY = y + py;
-      }
     }
   }
-  if (maxX < 0) return {0, 0, 0, 0};
-  return {minX, minY, maxX - minX + 1, maxY - minY + 1};
 }
 
 void write32le(uint8_t* p, uint32_t v) {
@@ -181,8 +170,72 @@ void write32le(uint8_t* p, uint32_t v) {
 }
 void write16le(uint8_t* p, uint16_t v) { p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; }
 
+// ---- Shared layout core -----------------------------------------------------
+// Paint all three elements into `cv` (local coords). Layout scales with the
+// canvas size relative to the 240x400 reference: at 240x400 every constant is
+// identical to the original, so the legacy BMP is reproduced pixel-for-pixel.
+// Returns true when a time line was drawn.
+bool drawCoverCore(Canvas& cv, const CoverInfo& info) {
+  const int w = cv.w, h = cv.h;
+  const int cx = w / 2;
+  const float sx = static_cast<float>(w) / static_cast<float>(kRefWidth);
+  const float sy = static_cast<float>(h) / static_cast<float>(kRefHeight);
+  const float s = sx < sy ? sx : sy;                 // uniform glyph scale
+  const int margin = static_cast<int>(16.0f * s + 0.5f);
+  int usableW = w - 2 * margin;
+  if (usableW < 8) usableW = 8;
+
+  // Large PUSH — top band, original cell=48/gap=4/top=100 at reference.
+  const float cellF = 48.0f * s;
+  const int cellI = static_cast<int>(cellF + 0.5f);
+  const int gap = static_cast<int>(4.0f * s + 0.5f);
+  const int pushW = 4 * cellI + 3 * gap;
+  int pushX = cx - pushW / 2;
+  const int pushTop = static_cast<int>(100.0f * sy + 0.5f);
+  for (char ch : {'P', 'U', 'S', 'H'}) {
+    drawVecGlyph(cv, ch, pushX, pushTop, cellF);
+    pushX += cellI + gap;
+  }
+
+  // Byte count carries a unit. Original y=252.
+  char line[48];
+  std::snprintf(line, sizeof(line), "%zu bytes", info.byteCount);
+  const int bsc = fitScale(line, usableW);
+  const int bytesY = static_cast<int>(252.0f * sy + 0.5f);
+  drawText(cv, line, bytesY, bsc > 0 ? bsc : 1, cx);
+
+  // Time line — original y=290; split to two centred lines if one won't fit.
+  // Omitted entirely on very small cards so the large word + byte count stay
+  // legible and nothing is clipped.
+  if (!info.timeText || !info.timeText[0]) return false;
+  if (w < kMinTimeLineWidth && h < kMinTimeLineHeight) return false;
+  const int timeY = static_cast<int>(290.0f * sy + 0.5f);
+  const int sc = fitScale(info.timeText, usableW);
+  if (sc > 0) {
+    drawText(cv, info.timeText, timeY, sc, cx);
+    return true;
+  }
+  const char* sp = std::strchr(info.timeText, ' ');
+  if (sp) {
+    const size_t n = static_cast<size_t>(sp - info.timeText);
+    std::string date(info.timeText, n);
+    std::string clock(sp + 1);
+    const int dsc = fitScale(date.c_str(), usableW);
+    const int csc = fitScale(clock.c_str(), usableW);
+    if (dsc > 0 && csc > 0) {
+      const int lh = 8 * dsc;
+      const int base = timeY - lh / 2;
+      drawText(cv, date.c_str(), base, dsc, cx);
+      drawText(cv, clock.c_str(), base + lh + static_cast<int>(4 * s + 0.5f), csc, cx);
+      return true;
+    }
+  }
+  return false;  // too small: omit time line rather than clip it
+}
+
 }  // namespace
 
+// ---- Public: legacy 240x400 BMP (thin adapter over the shared core) --------
 bool writeCoverBmp(WriteFn sink, void* ctx, const CoverInfo& info) {
   if (!sink) return false;
   constexpr int W = kThumbWidth, H = kThumbHeight;
@@ -194,55 +247,9 @@ bool writeCoverBmp(WriteFn sink, void* ctx, const CoverInfo& info) {
   auto pixels = std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[pixelsSize]);
   if (!pixels) return false;
 
-  Canvas cv{pixels.get(), W, H, rowBytes};
+  Canvas cv{pixels.get(), W, H, rowBytes, 0, 0, nullptr, nullptr};
   cv.clear();
-
-  // ---- Layout: evenly distributed, centred on the card midline. ----
-  // Large PUSH: cell=48px tall, centred slightly above middle (top ~100).
-  constexpr float kCell = 48.0f;
-  const int cellI = static_cast<int>(kCell + 0.5f);
-  const int pushW = 4 * cellI + 3 * 4;           // 4 glyphs + 3 gaps of 4px
-  int pushX = kCenterX - pushW / 2;              // centred -> left ~18
-  for (char ch : {'P', 'U', 'S', 'H'}) {
-    drawVecGlyph(cv, ch, pushX, 100, kCell);
-    pushX += cellI + 4;
-  }
-
-  // S3c final (甲方案): time line moved BELOW the byte-count line so the
-  // home-card theme's centred title box (canvas y~177..222, PUSH) no longer
-  // covers it. Large PUSH (y100..147) and byte count (y252..265) are UNCHANGED.
-  // Time line target y290..296: gap to byte-count bottom (265) is 25px (>=20),
-  // clear of the theme title box bottom (222), above the Continue Reading
-  // button (y361..391), and within the y320 safety ceiling. Scale/fitScale8,
-  // centring on x120 and stride are all untouched.
-
-  // Byte count MUST carry a unit. "4458 bytes" is 10 chars -> scale 2 fits (160px).
-  char line[48];
-  std::snprintf(line, sizeof(line), "%zu bytes", info.byteCount);
-  const int bsc = fitScale8(line);
-  drawText8(cv, line, 252, bsc > 0 ? bsc : 1);
-
-  // Time line: adaptive scale, centred; split into date / time if it will not fit.
-  if (info.timeText && info.timeText[0]) {
-    const int sc = fitScale8(info.timeText);
-    if (sc > 0) {
-      drawText8(cv, info.timeText, 290, sc);
-    } else {
-      // Fallback: split "YYYY-MM-DD HH:MM" into two centred lines at scale 1.
-      // y286 / y300: first line >= 21px below byte-count bottom, second ends
-      // y306 (< y320 ceiling), both above the Continue Reading button.
-      const char* sp = std::strchr(info.timeText, ' ');
-      if (sp) {
-        const size_t n = static_cast<size_t>(sp - info.timeText);
-        std::string date(info.timeText, n);
-        std::string clock(sp + 1);
-        drawText8(cv, date.c_str(), 286, 1);
-        drawText8(cv, clock.c_str(), 300, 1);
-      } else {
-        drawText8(cv, info.timeText, 290, 1);
-      }
-    }
-  }
+  drawCoverCore(cv, info);
 
   uint8_t header[headerSize];
   std::memset(header, 0, sizeof(header));
@@ -265,6 +272,15 @@ bool writeCoverBmp(WriteFn sink, void* ctx, const CoverInfo& info) {
     if (sink(ctx, row, rowBytes) != rowBytes) return false;
   }
   return true;
+}
+
+// ---- Public: S3cPF5 rect-driven vector cover -------------------------------
+bool renderCoverInRect(void* ctx, InkFn ink, int x, int y, int w, int h, const CoverInfo& info) {
+  if (!ink || w <= 0 || h <= 0) return false;
+  // Callback canvas has no BMP backing; stride is unused. setWhite is a no-op
+  // (caller paints white), and every ink pixel is clipped to the rect.
+  Canvas cv{nullptr, w, h, (w + 7) / 8, x, y, ink, ctx};
+  return drawCoverCore(cv, info);
 }
 
 }  // namespace pushthumb

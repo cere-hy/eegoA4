@@ -240,6 +240,12 @@ class BaseTheme {
   // Draws a pre-dithered cover thumb 1:1, centered and clipped to fill the
   // slot. Rescaling a dithered bitmap aliases badly, so overflow is cropped.
   static bool drawCoverThumbFill(const GfxRenderer& renderer, const Bitmap& bitmap, Rect slot, int xOffset = 0);
+  // S3cPF5: paint the PUSH virtual book's cover as pure vector art directly
+  // into `slot` — no thumb_400.bmp load and no centre-crop (the 240x400 bmp
+  // was being clipped into near-square cards, cutting off "P" and the date).
+  // Returns true iff `book` is the PUSH book and a cover was drawn; callers
+  // then skip the bmp path. Non-PUSH books are a no-op (false).
+  static bool drawPushCoverInRect(GfxRenderer& renderer, const RecentBook& book, Rect slot, int xOffset = 0);
   static void drawProgressBar(const GfxRenderer& renderer, Rect rect, size_t current, size_t total);
   void drawBatteryLeft(const GfxRenderer& renderer, Rect rect,
                        bool showPercentage = true) const;  // Left aligned (reader mode)

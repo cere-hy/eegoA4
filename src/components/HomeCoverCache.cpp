@@ -6,6 +6,8 @@
 #include <algorithm>
 
 #include "UITheme.h"
+#include "RecentBooksStore.h"
+#include "components/themes/BaseTheme.h"
 
 namespace fui = freeink::ui;
 
@@ -37,8 +39,41 @@ void HomeCoverCache::prepare() {
   }
 }
 
-bool HomeCoverCache::paint(fui::Rect rect, size_t index, const std::string& path) {
+bool HomeCoverCache::paint(fui::Rect rect, size_t index, const std::string& path, const RecentBook* book) {
   if (index >= cachedCovers.size()) return false;
+
+  // S3cPF5: PUSH virtual book is painted as vector art directly into this
+  // grid cell — the shared 240x400 bmp was centre-cropped into the ~113x170
+  // cell, cutting off "P" and the date. Draw after the cache-hit check below
+  // so the snapped region still serves repeat paints.
+  const bool isPush = book && book->path == "/PUSH.txt";
+  if (isPush) {
+    auto& cachedPush = cachedCovers[index];
+    uint8_t* const cd = coverCache.get();
+    if (coverCache && cachedPush.valid && cachedPush.rect.x == rect.x && cachedPush.rect.y == rect.y &&
+        cachedPush.rect.width == rect.width && cachedPush.rect.height == rect.height &&
+        renderer.copyBufferToRegion(rect.x, rect.y, rect.width, rect.height, cd + cachedPush.offset, cachedPush.bytes))
+      return true;
+    cachedPush.valid = false;
+    const Rect slot{rect.x, rect.y, rect.width, rect.height};
+    BaseTheme::drawPushCoverInRect(renderer, *book, slot);
+    renderer.drawRect(rect.x, rect.y, rect.width, rect.height);
+    if (coverCache) {
+      const size_t needed = renderer.getRegionByteSize(rect.x, rect.y, rect.width, rect.height);
+      if (needed > cachedPush.bytes && needed <= coverCacheCapacity - coverCacheUsed) {
+        cachedPush.offset = coverCacheUsed;
+        cachedPush.bytes = needed;
+        coverCacheUsed += needed;
+      }
+      if (needed > 0 && needed <= cachedPush.bytes) {
+        cachedPush.rect = rect;
+        cachedPush.valid =
+            renderer.copyRegionToBuffer(rect.x, rect.y, rect.width, rect.height, cd + cachedPush.offset, cachedPush.bytes);
+      }
+    }
+    return true;
+  }
+
   auto& cached = cachedCovers[index];
   uint8_t* const cacheData = coverCache.get();
   if (coverCache && cached.valid && cached.rect.x == rect.x && cached.rect.y == rect.y &&

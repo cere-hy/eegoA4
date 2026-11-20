@@ -43,7 +43,15 @@ void Lyra3CoversTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
         std::string coverPath = recentBooks[i].coverBmpPath;
         bool hasCover = true;
         int tileX = rect.x + Lyra3CoversMetrics::values.contentSidePadding + tileWidth * i;
-        if (coverPath.empty()) {
+        // S3cPF5: PUSH drawn as vector art into this ~213x226 card; the old
+        // 240x400 centre-crop clipped "P" and the date here. Non-PUSH unchanged.
+        const bool pushDrawn = drawPushCoverInRect(
+            renderer, recentBooks[i],
+            Rect{tileX + hPaddingInSelection, tileY + hPaddingInSelection,
+                 tileWidth - 2 * hPaddingInSelection, Lyra3CoversMetrics::values.homeCoverHeight});
+        if (pushDrawn) {
+          hasCover = true;
+        } else if (coverPath.empty()) {
           hasCover = false;
         } else {
           const std::string coverBmpPath = UITheme::getCoverThumbPath(coverPath, homeCoverThumbHeight(renderer));

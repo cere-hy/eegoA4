@@ -9,6 +9,7 @@
 #include <string>
 
 class GfxRenderer;
+struct RecentBook;
 
 // Screen-lifetime thumbnail decoding and PSRAM region snapshots.
 class HomeCoverCache {
@@ -19,7 +20,9 @@ class HomeCoverCache {
   void prepare();
   void invalidate();
   void invalidate(size_t index);
-  bool paint(freeink::ui::Rect rect, size_t index, const std::string& path);
+  // S3cPF5: `book` may be null; when it is the PUSH virtual book the cover is
+  // painted as vector art into `rect` instead of loading a centre-cropped bmp.
+  bool paint(freeink::ui::Rect rect, size_t index, const std::string& path, const RecentBook* book = nullptr);
 
  private:
   struct CachedCover {

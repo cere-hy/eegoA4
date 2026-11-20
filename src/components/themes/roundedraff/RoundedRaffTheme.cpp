@@ -76,7 +76,14 @@ void RoundedRaffTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
     if (!coverRendered) {
       std::string coverPath = book.coverBmpPath;
       bool hasCover = true;
-      if (coverPath.empty()) {
+      // S3cPF5: PUSH drawn as vector art into this 240x300 card; the old
+      // 240x400 centre-crop clipped the date. Non-PUSH books keep the bmp path.
+      const bool pushDrawn = drawPushCoverInRect(
+          renderer, book,
+          Rect{tileX + (tileWidth - coverWidth) / 2, imgY, coverWidth, RoundedRaffMetrics::values.homeCoverHeight});
+      if (pushDrawn) {
+        hasCover = true;
+      } else if (coverPath.empty()) {
         hasCover = false;
       } else {
         const std::string coverBmpPath =

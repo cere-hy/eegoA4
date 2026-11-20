@@ -26,6 +26,27 @@ static int rd16(int off) { return g_buf[off] | (g_buf[off+1]<<8); }
 static int checks = 0, red = 0;
 #define CHECK(cond, msg) do { ++checks; if (!(cond)) { ++red; printf("RED: %s\n", msg); } } while (0)
 
+/* ---- S3cPF5: ink-pixel collector for renderCoverInRect() ---------------- */
+static uint8_t g_ink[600 * 600];  // absolute-coordinate ink grid
+static int g_inkX, g_inkY;  // rect origin (x used to localise; y kept for symmetry)
+static int iMinX, iMinY, iMaxX, iMaxY, iCount;
+static void inkReset(int ox, int oy) {
+  memset(g_ink, 0, sizeof(g_ink));
+  g_inkX = ox; g_inkY = oy;
+  iMinX = iMinY = 1 << 30; iMaxX = iMaxY = -1; iCount = 0;
+}
+static void inkCb(void* ctx, int x, int y, bool state) {
+  (void)ctx;
+  if (!state) return;
+  if (x < 0 || x >= 600 || y < 0 || y >= 600) return;
+  g_ink[y * 600 + x] = 1;
+  ++iCount;
+  if (x < iMinX) iMinX = x;
+  if (x > iMaxX) iMaxX = x;
+  if (y < iMinY) iMinY = y;
+  if (y > iMaxY) iMaxY = y;
+}
+
 int main(void) {
   CoverInfo info = {"2026-11-19 12:34", 2834};
   g_len = 0;
@@ -158,6 +179,76 @@ int main(void) {
     int diff = 0; for (size_t i = 0; i < sl; ++i) if (g_buf[i] != snap[i]) ++diff;
     CHECK(diff > 0, "P2: byte count value reflected in cover pixels");
     CHECK(sl == g_len, "P2: byte count change keeps BMP size");
+  }
+
+  /* ---- S3cPF5: rect-driven vector cover (no BMP, per-theme rects) ---- */
+  {
+    CoverInfo pf5 = {"2026-11-19 08:58", 4458};
+
+    // (a) Classic 240x400 via rect renderer must equal the legacy BMP ink.
+    // Re-render 4458 into g_buf (an earlier check overwrote it with 12345).
+    g_len = 0;
+    CHECK(writeCoverBmp(sink, NULL, pf5), "PF5: re-render legacy 4458");
+    auto legacyInk = [&](int cx, int cy) {
+      const uint8_t b = prows[(pushthumb::kThumbHeight - 1 - cy) * rowBytes + (cx >> 3)];
+      return !((b >> (7 - (cx & 7))) & 1);
+    };
+    inkReset(0, 0);
+    bool drewTime = renderCoverInRect(nullptr, inkCb, 0, 0, 240, 400, pf5);
+    CHECK(drewTime, "PF5: classic 240x400 draws time line");
+    int mismatch = 0, extra = 0;
+    for (int cy = 0; cy < 400; ++cy)
+      for (int cx = 0; cx < 240; ++cx) {
+        const bool a = legacyInk(cx, cy) != 0;
+        const bool b = g_ink[cy * 600 + cx] != 0;
+        if (a != b) ++mismatch;
+        if (!a && b) ++extra;
+      }
+    CHECK(mismatch == 0, "PF5: rect renderer is byte-identical to legacy 240x400 BMP");
+    (void)extra;
+
+    // (b) Per-theme rects: all ink must stay inside the card, be centred, and
+    //     never clipped at an edge. Origins are non-zero to test translation.
+    struct Rect { int w, h; const char* name; };
+    const Rect rects[] = {
+        {240, 226, "Lyra"}, {214, 226, "Lyra3Covers"},
+        {240, 300, "RoundedRaff"}, {113, 170, "grid-small"},
+        {150, 150, "min-card"},
+    };
+    for (const Rect& r : rects) {
+      const int ox = 37, oy = 53;  // arbitrary card placement
+      inkReset(ox, oy);
+      renderCoverInRect(nullptr, inkCb, ox, oy, r.w, r.h, pf5);
+      CHECK(iCount > 0, "PF5: ink present on card");
+      CHECK(iMinX >= ox && iMaxX < ox + r.w, "PF5: ink inside card horizontally");
+      CHECK(iMinY >= oy && iMaxY < oy + r.h, "PF5: ink inside card vertically (no clip)");
+      const int lx0 = iMinX - ox, lx1 = iMaxX - ox;
+      const int cx2 = lx0 + lx1;  // 2*local-centre
+      CHECK(cx2 >= r.w - 8 && cx2 <= r.w + 8, "PF5: art centred on card midline (+/-4px)");
+      // Large word must not be cut off at left/right edges.
+      CHECK(lx0 >= 2 && lx1 <= r.w - 3, "PF5: no horizontal word clipping");
+    }
+
+    // (c) Small-card legibility policy: time line omitted on very small cards
+    //     (w<120 && h<150) so nothing is clipped; byte count always present.
+    inkReset(0, 0);
+    bool tinyTime = renderCoverInRect(nullptr, inkCb, 0, 0, 100, 140, pf5);
+    CHECK(!tinyTime, "PF5: time line omitted on tiny 100x140 card");
+    CHECK(iCount > 0, "PF5: tiny card still shows large PUSH + bytes");
+
+    // (d) Minimum card 150x150: large PUSH glyph height must be >= 14px.
+    inkReset(0, 0);
+    renderCoverInRect(nullptr, inkCb, 0, 0, 150, 150, pf5);
+    // Large-word band is the top ink segment; measure rows above byte band.
+    int topMinY = iMinY, topMaxY = iMinY;
+    for (int cy = iMinY; cy <= iMaxY; ++cy) {
+      bool any = false;
+      for (int cx = 0; cx < 150; ++cx) if (g_ink[cy * 600 + cx]) { any = true; break; }
+      if (any) topMaxY = cy;
+      // stop at first blank gap after the word
+      if (!any && cy > topMinY + 4) break;
+    }
+    CHECK((topMaxY - topMinY + 1) >= 14, "PF5: 150x150 large PUSH height >= 14px (readable)");
   }
 
   printf("PushThumb host: %d checks, %d RED\n", checks, red);

@@ -46,6 +46,15 @@ struct Stats {
 // secondary/advance handlers receive it through their `void* ctx` argument.
 // S3c+ engineering rule: tier-③ is per-face so PUSH/FAST and any other face
 // cannot overwrite each other's SD fallback pointer.
+// S3cPF5 — "confirmed absent" codepoint set. A codepoint that reached tier ④
+// (no source has it) is recorded here; later occurrences short-circuit to the
+// placeholder WITHOUT re-running all three rasterising tiers or re-logging.
+// This is the root-cause fix for built-in mode's super-linear cost: before this
+// set, an emoji/special glyph re-ran builtin→PIF1→SD rasterisation and emitted
+// a 115200-baud log line on EVERY occurrence and on EVERY page turn.
+// Bounded, RAM-resident, per-face (lives in FallbackContext, never on a task
+// stack). Full set simply stops caching new entries — no correctness loss.
+static constexpr size_t kMissingCacheCap = 256;
 struct FallbackContext {
   TtfEpdFont* sdFont = nullptr;      // tier ③ (SD font). nullptr disables tier ③.
   TtfEpdFont* builtinFace = nullptr; // tier ① (builtin.ttf vector) for SD-vector faces;
@@ -54,6 +63,27 @@ struct FallbackContext {
   uint32_t cjkSeen = 0;
   uint32_t cjkMissing = 0;
   void* unavailable = nullptr;       // std::atomic<bool>* when provided
+
+  uint32_t missingCps[kMissingCacheCap]{};  // confirmed-absent codepoints
+  uint16_t missingCount = 0;
+
+  // True if `cp` was previously confirmed absent by tier ④.
+  bool isMissing(uint32_t cp) const {
+    for (uint16_t i = 0; i < missingCount; ++i)
+      if (missingCps[i] == cp) return true;
+    return false;
+  }
+  // Record `cp` as confirmed absent. Returns true only for a NEW entry (used
+  // to emit the miss log exactly once per codepoint). Full cache => false.
+  bool markMissing(uint32_t cp) {
+    if (isMissing(cp)) return false;
+    if (missingCount >= kMissingCacheCap) return false;
+    missingCps[missingCount++] = cp;
+    return true;
+  }
+  // Clear on face rebuild / SD-tier change: a newly available SD font can
+  // supply glyphs that were previously absent.
+  void resetMissing() { missingCount = 0; }
 };
 
 // Install the SAME secondary/advance handler chain into an SD vector face

@@ -54,6 +54,12 @@ inline uint8_t cov1bit(uint8_t a) { return a < 128 ? 0 : 1; }
 bool secondary(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font) {
   FallbackContext* c = static_cast<FallbackContext*>(ctx);
 
+  // S3cPF5: confirmed-absent short circuit. A codepoint that already reached
+  // tier ④ is known to have NO source; re-running builtin/PIF1/SD rasterising
+  // on every occurrence (and every page) was the super-linear built-in cost.
+  // Return straight to the placeholder path — no chain, no log.
+  if (c && c->isMissing(cp)) return false;
+
   // S3c-plus2 tier ①: builtin.ttf VECTOR glyph, for SD-vector faces only.
   // `rasterizedBitmap` uses builtinFace's OWN cmap and does NOT call its
   // secondary_ (TtfEpdFont.cpp:630), so there is no recursion back into this
@@ -122,11 +128,13 @@ bool secondary(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font) {
   }
 
   // Tier ④: no source has this codepoint. Graceful degradation: leave it to
-  // EpdFont's replacement glyph (transparent box) + one ASCII log line. Never
-  // fail the page. Track CJK miss ratio so a wildly unsupported doc can show
-  // the ASCII notice once.
+  // EpdFont's replacement glyph (transparent box) + ONE ASCII log line per
+  // codepoint. Never fail the page. Record the absence so later occurrences
+  // short-circuit at the top of this function (no chain, no log). Track CJK
+  // miss ratio so a wildly unsupported doc can show the ASCII notice once.
   if (c) ++c->stats.misses;
-  LOG_INF("PFNT", "glyph miss U+%04X (tiers 1-3 all failed; placeholder)", (unsigned)cp);
+  const bool newMiss = c ? c->markMissing(cp) : true;
+  if (newMiss) LOG_INF("PFNT", "glyph miss U+%04X (tiers 1-3 all failed; placeholder)", (unsigned)cp);
   if (cp >= 0x3400 && cp <= 0x9FFF) {
     if (c) {
       ++c->cjkSeen;
@@ -141,6 +149,12 @@ bool secondary(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font) {
 // Advance-only query. Mirrors secondary()'s tier order but touches NO bitmap.
 bool advanceOnly(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font, uint16_t& adv12_4) {
   FallbackContext* c = static_cast<FallbackContext*>(ctx);
+  // S3cPF5: measure path must honour the same confirmed-absent set as the draw
+  // path, otherwise every measure pass re-runs builtin/PIF1/SD advance lookups
+  // for a glyph the draw pass already proved absent. Note: a glyph can have an
+  // advance in f.advances (cached) even when absent from the bitmap tier; that
+  // cache is checked by getAdvance() before this handler and stays authoritative.
+  if (c && c->isMissing(cp)) return false;
   // S3c-plus2 tier ①: builtin.ttf VECTOR advance, SD-vector faces only.
   // primaryAdvanceOnly() touches only builtinFace's cmap/table — NEVER its
   // advanceHandler_ — so it cannot recurse back into this SD face's chain.
@@ -191,7 +205,12 @@ void installGlobalFallback(EpdFontData& data) {
                                    // no RAM-only coverage index to consult.
 }
 
-void setSdFallback(FallbackContext& ctx, TtfEpdFont* font) { ctx.sdFont = font; }
+void setSdFallback(FallbackContext& ctx, TtfEpdFont* font) {
+  // S3cPF5: the tier-③ source changed (font loaded/removed). Glyphs previously
+  // confirmed absent may now be supplied by the new SD font — invalidate.
+  if (ctx.sdFont != font) ctx.resetMissing();
+  ctx.sdFont = font;
+}
 
 void installSdVectorFallback(TtfEpdFont& font, FallbackContext& ctx, TtfEpdFont& builtinFace) {
   // Tier ① builtin vector; tier ② PIF1; tier ③ intentionally DISABLED (the
@@ -201,6 +220,7 @@ void installSdVectorFallback(TtfEpdFont& font, FallbackContext& ctx, TtfEpdFont&
   ctx.sdFont = nullptr;
   ctx.stats = Stats{};
   ctx.cjkSeen = ctx.cjkMissing = 0;
+  ctx.resetMissing();  // S3cPF5: fresh face — rebuild the absent set from scratch
   ctx.unavailable = &g_unavailable;
   font.setSecondaryHandler(&secondary, &ctx);
   font.setAdvanceHandler(&advanceOnly, &ctx);
@@ -222,6 +242,7 @@ void installInto(TtfEpdFont& pushFont, FallbackContext& ctx) {
   ctx.builtinFace = nullptr;  // PUSH/FAST are themselves the builtin primary — never tier① into self
   ctx.stats = Stats{};
   ctx.cjkSeen = ctx.cjkMissing = 0;
+  ctx.resetMissing();  // S3cPF5: point-size rebuild — re-confirm absences
   ctx.unavailable = &g_unavailable;
   g_unavailable.store(false, std::memory_order_release);
   pushFont.setSecondaryHandler(&secondary, &ctx);

@@ -322,6 +322,8 @@ bool CoverGridHomeUi::paintFramedCover(fui::DrawTarget& target, fui::Rect rect, 
   target.fill(fui::Rect{static_cast<int16_t>(rect.x + SHADOW_OFFSET), rect.bottom(), rect.width, SHADOW_OFFSET}, ink);
   // The false spine draws inside the cover paint (HomeCoverCache), glued to
   // the art's left edge, so it stays aligned whatever each cover's margin is.
-  const bool drawn = index < coverPaths.size() && coverCache.paint(rect, index, coverPaths[index]);
+  // S3cPF5: pass the book so the PUSH virtual book paints as vector art.
+  const RecentBook* bookPtr = index < books->size() ? &(*books)[index] : nullptr;
+  const bool drawn = index < coverPaths.size() && coverCache.paint(rect, index, coverPaths[index], bookPtr);
   return drawn;
 }
