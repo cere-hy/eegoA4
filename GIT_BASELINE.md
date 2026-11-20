@@ -143,3 +143,13 @@
 - 速度评估(P2只答未优化)：37969B mode=0 的 parse ms 日志被用户截断无法给实测(不编造)；4.2ms/字线性外推是上界(重复字命中 per-face advance 表近乎零成本)；日志去重约省 250ms 量级；advance 预热是迁移成本非消除，先复测再定
 - host 15/15 全绿；验收核心：①-② 图标方向/对比图、③-④ 网格PUSH格封面、⑤-⑥ 日志去重、⑦-⑧ 不回归与大字/时间可读
 - 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf4_factory.bin`（待真机验收，非日常用件）
+
+## S3cPF5 — PUSH 矢量封面 + 内置耗时（b65-s3c-pf5，2026-11-20）
+- commit `fd66c33f`（15 文件 / +494 / −120；前一干净基线 `35488d6d`）
+- app sha256 `d806a51841bef8ba52d6a7213eecd4fa27c782e27e64e39ba9a63922801a7d4b`（6,023,504 B）
+- factory sha256 `361c29b90a3748ccfd8c0d385b30db5a7a260cab50f5164be3660bb0c1fd564e`（6,089,040 B；factory−app=65,536）
+- A 级双冷编：app/factory/elf/MANIFEST 四产物逐字节 MATCH，A_LEVEL_CLOSURE=PASS，epoch=1794813449，真实退出码 0（两次）
+- 封面根因：thumb_400.bmp(240×400 竖版)被 drawCoverThumbFill 居中裁切进各主题近方形格子（Lyra135×226/Lyra3Covers213×226/RoundedRaff180×300/网格113×170），横向切"P"、纵向切日期。修：抽出 pushthumb::renderCoverInRect()（纯矢量+ink回调、库内 clip），writeCoverBmp 复用同一核心（经典 240×400 经 cmp 字节一致零回归）；BaseTheme::drawPushCoverInRect() 把 ink 接 renderer.drawPixel，各主题传自己矩形（非PUSH书走原bmp逐字不改）；thumb_400.bmp 生成逻辑全保留。小卡 150×150 大字墨迹 18px(≥14阈值)，w<120&&h<150 省略时间行防裁断
+- 内置耗时根因：secondary() tier④ 失败不缓存，缺失码点每次出现/每次翻页重跑 builtin→PIF1→SD 三级栅格化并打 PFNT 日志（O(出现次数)超线性）。修：FallbackContext 加 256 容量已确认缺失码点集合，secondary()/advanceOnly() 入口 isMissing 短路，tier④ markMissing 首次才打日志；face重建/setSdFallback 变更时 resetMissing。header +30 / cpp +31 行，不动 TtfEpdFont/阅读器。命中字零改动故 2640B(840ms)零回归；6236B 预期降到2秒级属机制预期，端到端待真机复测(不编造)
+- host 15/15 全绿（PushThumb 40→71 checks、新增 MissingCache 14 checks）
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf5_factory.bin`（待真机验收）
