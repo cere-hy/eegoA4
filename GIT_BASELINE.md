@@ -170,3 +170,17 @@
 - 挂账2（内部 RAM 5144B 定位）：ELF 段级+符号级实证 pf5↔pf6 的 .dram0.bss(120520B)/.dram0.data(32851B) **完全一致、符号差分零新增**，readelf 全符号无 size=5144 对象；FontMap 数据在 PSRAM。**pf6 未新增任何内部 RAM 静态结构，5144B 无对应新增符号**（最接近既有 cover[72×72]=5184B，P0fix 遗留非本批）。最坏情况剩余≈69KB Free/~28KB MaxAlloc（推算量级，>20KB）→ **不阻塞**；PSRAM 失败回退申请91KB>28KB 会分配失败并降级 fallback，不崩不实占
 - 挂账3（4549B 超线性，P2）：关联成立（渲染期 `getGlyph→faultGlyph→FT_Render_Glyph` 栅格化，`getAdvance` 已 advance-only），同意**暂缓独立调查，待挂账1落地后同条件重测**；4549B 曲线本轮无日志原文，归因为定性非实测
 - 判定文档：`/workspace/S3cPF6_二次诊断判定_挂账确认与真机验收收尾.md`
+
+## S3cPF7 — P0 USB MSC 读回调崩溃修复（b65-s3c-pf7，2026-11-21）
+- 主仓 commit `976d8f45`（3 文件 / +26 / −1：HalStorage.h/.cpp + 子模块指针）；子模块 freeink-sdk commit `ad92e32`（UsbMassStorage.h/.cpp + MscIoLock.h + test/host，+50 / −2）
+- app sha256 `0f1c7492416dc32e34f8cc514a4a11cefddd38d31ff64b4ff5f4ebafe09b6859`（6,030,768 B）
+- factory sha256 `e1599ce762ac0aaa3544e4012cdfe5eaf8aae119d62e4040eaf2698942b96753`（6,096,304 B；factory−app=65,536）
+- A 级双冷编：app/factory/elf/MANIFEST 四产物逐字节 MATCH，A_LEVEL_CLOSURE=PASS，epoch=1794813449，真实退出码 0（两次，各 783 编译单元，-j3 规避 cgroup 8GB OOM）
+- 根因：TinyUSB `usbd` 任务（`xTaskCreate` 无核绑定、最高优先级）处理首个 READ(10)：`tud_msc_read10_cb→mscRead→sd.card()->readSectors()`，**全程绕过 `HalStorage::storageMutex`**。与 core1（loopTask/renderTask）并发摸同一 SdFat 卡，`SdSpiCard::m_spiActive` 无锁状态机跨核交错：core1 `spiStart` take `spi->lock` 置 `m_spiActive=true`；usbd `spiStart` 见 `m_spiActive==true` **跳过 take**，其 `spiStop` 见 `m_spiActive==true` 却**无条件 give**→非持有者释放→`xTaskPriorityDisinherit`。接电脑首个 READ(10) 必崩、不接电脑不崩，完全吻合
+- 钉子2 结论：`ENABLE_DEDICATED_SPI=1`（SdFatConfig 默认非小AVR板，未覆盖），但 A4 用 `SHARED_SPI`→`m_dedicatedSpi=false`→`readSectors` 末尾走 `readStop()`，每次块读 take/give 同步成对；断言点不是"readStop 不同步"，而是 `spiStart` 的 `if(!m_spiActive)` 短路跳过 take、`spiStop` 无条件 give 的窗口。`spi->lock`=`xSemaphoreCreateMutex()`（普通 mutex，esp32-hal-spi.c:762），跨任务 give 即断言直接触发点，与诊断一致
+- 修复（谁加谁解归位）：`UsbMassStorage::begin(dev, IoLockFn=nullptr, void*=nullptr)`（默认参数，旧 `begin(dev)` 不破坏）；`HalStorage::usbMscLockFn` take/give **既有递归 `storageMutex`（类型未改）**；`mscRead/mscWrite` 首行 `IoLockGuard`（RAII）覆盖 `isRangeValid→sectorCount`(CDS读)+块读写+`markAccessed/markIoError` 全 return 路径，take 失败 return -1。usbd 任务内 take/give，跨核交错消除
+- 钉子1（实证日志）：`mscRead/mscWrite` 加 `[MSC] read|write lba=%u ns=%u task=%s core=%d`（`pcTaskGetName(null)+xPortGetCoreID()`），`LOG_DBG`——dev(LOG_LEVEL=2) 可见、release(LOG_LEVEL=1) 编译掉
+- 钉子3（持锁时长）：MSC EP buffer=4096B=8扇区/次；单次 `mscRead` 持 L1 ≈3.3ms、`mscWrite` ≈16.3ms（含 NAND 编程），均 **<50ms → 不降级**；写大文件瞬间可能顶满一帧 UI 偶发卡顿（已知，必要时再加"USB 模式停 usbDriveState 轮询"开关，本批未做）
+- 验证：host 30 套 29 PASS+1 既有 FAIL（ContentProtection `test_zip.cpp` `-Werror=sized-deallocation`，未触碰）；新增 `UsbMassStorage/test/host` 19 checks 全绿；符号级 `HalStorage::usbMscLockFn`/`IoLockGuard::~IoLockGuard`/`mscRead/mscWrite` 入 ELF、日志串入固件
+- 边界不变：APK/协议/B3/0x07-0x08 零触碰；`storageMutex` 递归类型不变；熔断令有效；不开 S4
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf7_factory.bin`（待真机验收）
