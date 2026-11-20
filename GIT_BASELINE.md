@@ -163,3 +163,10 @@
 - 阶段二 FontMap：epd::FontMap 加载期解析 cmap(f4/f12)+hmtx→BMP 位图存在标记+稠密 advance(2B/码点)；LXGW 42220 码点=91.0KiB(<100KiB)，supp 2590 走 fallback。缓存 /.crosspoint/fontmap/<fnv(path)_mtime_size>.fmap，损坏忽略重建。TtfEpdFont::getAdvance 热表 miss 后查 map，经 FtFont::unitsToAdvance26_6(FT_MulFix x_scale) 换算，与 FreeType 字节一致(host 三档字号各100码点 diff=0 + probe 400 diff=0)。内置/PUSH face 不挂 map 零回归。AdvanceTable.h/FallbackChain.h 零改动
 - host 16 套全绿（FontMap 新套 12×2；PushThumb 71→75 含 4 条时间断言）
 - 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf6_factory.bin`（待真机验收）
+
+### S3cPF6 真机验收判定（2026-11-20，二次诊断 · 挂账确认 · 收尾）
+- **判定：核心目标达成，排版性能目标（Follow Global 追平/超越内置）通过，标注「真机验收通过」**。真机实测（本轮实测为准）：LXGW **334ms** vs Built-in **982ms**（2859B / 9 页），LXGW≈Built-in 的 0.34×（快约 2.9×）；渲染慢根因=字形栅格化（非 SD 读）。本轮代码零改动（只答挂账 + 更新文档/账本），边界不变、熔断令有效、不开 S4
+- 挂账1（字形位图预缓存，P1，只评估不出件）：16pt→sizePx=33；2-bit(现状同精度) 297B/字×3000=870.1KiB + 元数据46.9KiB + 索引8.5KiB ≈ **0.90MiB**；8-bit 保真 3.17MiB、1-bit 下界 483KiB。可复用现有 per-face glyph arena（PSRAM，reader cap=1MB/maxGlyphs=4096，跨页保留、canGrow 门控）。与 AdvanceTable.h 关系=**并存**（四源查询链，AdvanceTable.h 零改动，不做同构扩展）
+- 挂账2（内部 RAM 5144B 定位）：ELF 段级+符号级实证 pf5↔pf6 的 .dram0.bss(120520B)/.dram0.data(32851B) **完全一致、符号差分零新增**，readelf 全符号无 size=5144 对象；FontMap 数据在 PSRAM。**pf6 未新增任何内部 RAM 静态结构，5144B 无对应新增符号**（最接近既有 cover[72×72]=5184B，P0fix 遗留非本批）。最坏情况剩余≈69KB Free/~28KB MaxAlloc（推算量级，>20KB）→ **不阻塞**；PSRAM 失败回退申请91KB>28KB 会分配失败并降级 fallback，不崩不实占
+- 挂账3（4549B 超线性，P2）：关联成立（渲染期 `getGlyph→faultGlyph→FT_Render_Glyph` 栅格化，`getAdvance` 已 advance-only），同意**暂缓独立调查，待挂账1落地后同条件重测**；4549B 曲线本轮无日志原文，归因为定性非实测
+- 判定文档：`/workspace/S3cPF6_二次诊断判定_挂账确认与真机验收收尾.md`
