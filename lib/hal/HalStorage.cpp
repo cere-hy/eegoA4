@@ -266,6 +266,13 @@ uint32_t HalFile::modificationTime() {
   if (!impl || !impl->file.getModifyDateTime(&date, &time) || date == 0) return 0;
   return (static_cast<uint32_t>(date) << 16) | time;
 }
+bool HalFile::setModificationTime(const uint16_t year, const uint8_t month, const uint8_t day, const uint8_t hour,
+                                  const uint8_t minute, const uint8_t second) {
+  HalStorage::StorageLock lock;
+  if (!impl) return false;
+  // 4 == FatFile::T_WRITE: set the last write/modification timestamp only.
+  return impl->file.timestamp(4, year, month, day, hour, minute, second);
+}
 bool HalFile::seek(size_t pos) { HAL_FILE_WRAPPED_CALL(seekSet, pos); }
 bool HalFile::seek64(uint64_t pos) { HAL_FILE_WRAPPED_CALL(seekSet, pos); }
 bool HalFile::seekCur(int64_t offset) { HAL_FILE_WRAPPED_CALL(seekCur, offset); }

@@ -26,6 +26,25 @@ static int rd16(int off) { return g_buf[off] | (g_buf[off+1]<<8); }
 static int checks = 0, red = 0;
 #define CHECK(cond, msg) do { ++checks; if (!(cond)) { ++red; printf("RED: %s\n", msg); } } while (0)
 
+/* ---- S3cPF6: FAT timestamp encode/decode (mirror of BaseTheme/PushTextSink) */
+static uint16_t pf6_fatDate(int y, int m, int d) {
+  return (uint16_t)(((y - 1980) << 9) | (m << 5) | d);
+}
+static uint16_t pf6_fatTime(int h, int mi, int s) {
+  return (uint16_t)((h << 11) | (mi << 5) | (s >> 1));
+}
+static uint32_t pf6_packed(int y, int m, int d, int h, int mi, int s) {
+  return ((uint32_t)pf6_fatDate(y, m, d) << 16) | pf6_fatTime(h, mi, s);
+}
+// Byte-identical to BaseTheme.cpp fatTimeToText().
+static void pf6_decode(uint32_t packed, char out[17]) {
+  if (packed == 0) { strcpy(out, "0000-00-00 00:00"); return; }
+  const uint16_t date = (uint16_t)(packed >> 16), tim = (uint16_t)(packed & 0xFFFF);
+  const int year = 1980 + ((date >> 9) & 0x7F), mon = (date >> 5) & 0x0F, day = date & 0x1F;
+  const int hour = (tim >> 11) & 0x1F, min = (tim >> 5) & 0x3F;
+  snprintf(out, 17, "%04d-%02d-%02d %02d:%02d", year, mon, day, hour, min);
+}
+
 /* ---- S3cPF5: ink-pixel collector for renderCoverInRect() ---------------- */
 static uint8_t g_ink[600 * 600];  // absolute-coordinate ink grid
 static int g_inkX, g_inkY;  // rect origin (x used to localise; y kept for symmetry)
@@ -249,6 +268,22 @@ int main(void) {
       if (!any && cy > topMinY + 4) break;
     }
     CHECK((topMaxY - topMinY + 1) >= 14, "PF5: 150x150 large PUSH height >= 14px (readable)");
+  }
+
+  /* ---- S3cPF6: cover time content chain ---------------------------------- */
+  {
+    char t[17];
+    // FS_DEFAULT_DATE = FS_DATE(compileYear(),1,1) + FS_TIME(0,0,0) -> 2026-01-01.
+    pf6_decode(pf6_packed(2026, 1, 1, 0, 0, 0), t);
+    CHECK(strcmp(t, "2026-01-01 00:00") == 0, "PF6: SdFat default date decodes to 2026-01-01 00:00");
+    // A real push instant round-trips through FAT packing.
+    pf6_decode(pf6_packed(2026, 11, 20, 21, 13, 44), t);
+    CHECK(strcmp(t, "2026-11-20 21:13") == 0, "PF6: push RTC decodes to correct YYYY-MM-DD HH:MM");
+    // Different push instants must produce different packed values (mtime updates).
+    CHECK(pf6_packed(2026, 11, 20, 21, 13, 0) != pf6_packed(2026, 11, 20, 21, 14, 0),
+          "PF6: adjacent-minute pushes yield distinct mtimes");
+    pf6_decode(0, t);
+    CHECK(strcmp(t, "0000-00-00 00:00") == 0, "PF6: zero FAT time -> zero date string");
   }
 
   printf("PushThumb host: %d checks, %d RED\n", checks, red);

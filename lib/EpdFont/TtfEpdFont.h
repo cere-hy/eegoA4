@@ -51,6 +51,9 @@
 #include "EpdFont.h"
 #include "EpdFontData.h"
 #include "EpdFontFamily.h"
+#include "FontMap.h"
+
+#include <memory>
 
 class TtfEpdFont {
  public:
@@ -127,6 +130,16 @@ class TtfEpdFont {
     advanceCtx_ = ctx;
   }
   bool getAdvance(uint32_t codepoint, uint8_t style, uint16_t& adv12_4);
+
+  // S3cPF6: attach a load-time codepoint->advanceWidth map (shared across all
+  // faces/variants of this family). When getAdvance misses its persistent hot
+  // table it consults this map BEFORE FreeType, avoiding a per-codepoint SD
+  // seek into hmtx (which can live ~15 MB into LXGW). A hit is converted to
+  // 12.4 via FtFont's x_scale and inserted through the SAME advanceTableInsert
+  // path — AdvanceTable.h / FallbackChain.h are untouched. Set to nullptr (the
+  // default) for built-in / PUSH embedded faces, which never read SD.
+  void setFontMap(std::shared_ptr<epd::FontMap> map) { fontMap_ = std::move(map); }
+  const epd::FontMap* fontMap() const { return fontMap_.get(); }
 
   // S3c-plus2: PRIMARY-ONLY advance probe for a fallback handler. Returns the
   // builtin/own-face vector advance (ordered table or ONE cmap metrics load),
@@ -280,6 +293,8 @@ class TtfEpdFont {
   // S3c final advance-only source (nullptr for every font except PUSH embedded).
   AdvanceHandler advanceHandler_ = nullptr;
   void* advanceCtx_ = nullptr;
+  // S3cPF6 load-time advance map (nullptr = not attached / built-in faces).
+  std::shared_ptr<epd::FontMap> fontMap_;
 };
 
 // S3c+ [EHP-PROF] — lightweight cumulative glyph-rasterization profiler. Counts

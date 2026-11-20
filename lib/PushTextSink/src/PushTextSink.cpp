@@ -174,8 +174,35 @@ static bool cleanPart(std::string& outClean) {
   return true;
 }
 
+// S3cPF6: a single push instant, captured once and shared by the document
+// mtime and the cover so both time displays are byte-for-byte同源.
+struct PushInstant {
+  uint16_t year;
+  uint8_t month, day, hour, minute, second;
+};
+static PushInstant capturePushInstant() {
+  const std::time_t now = std::time(nullptr);
+  struct tm lt {};
+  if (localtime_r(&now, &lt) != nullptr) {
+    return {static_cast<uint16_t>(lt.tm_year + 1900), static_cast<uint8_t>(lt.tm_mon + 1),
+            static_cast<uint8_t>(lt.tm_mday), static_cast<uint8_t>(lt.tm_hour),
+            static_cast<uint8_t>(lt.tm_min), static_cast<uint8_t>(lt.tm_sec)};
+  }
+  // Fallback: no RTC yet; let SdFat keep its default (we skip stamping).
+  return {0, 0, 0, 0, 0, 0};
+}
+static void formatInstant(const PushInstant& p, char out[32]) {
+  if (p.year == 0) {
+    std::snprintf(out, 32, "0000-00-00 00:00");
+  } else {
+    std::snprintf(out, 32, "%04u-%02u-%02u %02u:%02u", p.year, p.month, p.day, p.hour, p.minute);
+  }
+}
+
 /// Transactional four-beat: PUSH.txt -> .bak -> tmp(cleaned) -> PUSH.txt -> clear .bak.
-static bool commitDocument(const std::string& cleaned) {
+/// `inst` (when year!=0) is stamped onto the final file so its FAT mtime equals
+/// the push instant instead of SdFat's compile-year placeholder.
+static bool commitDocument(const std::string& cleaned, const PushInstant& inst) {
   {  // 1) cleaned -> tmp
     HalFile t;
     if (!Storage.openFileForWrite("PUSH", kTmpPath, t)) {
@@ -184,6 +211,11 @@ static bool commitDocument(const std::string& cleaned) {
     }
     const size_t w = t.write(reinterpret_cast<const uint8_t*>(cleaned.data()), cleaned.size());
     t.flush();
+    // S3cPF6: stamp the tmp BEFORE rename so PUSH.txt inherits the push time.
+    if (inst.year != 0 &&
+        !t.setModificationTime(inst.year, inst.month, inst.day, inst.hour, inst.minute, inst.second)) {
+      logf("commit mtime stamp FAIL (mtime may stay placeholder)");
+    }
     if (w != cleaned.size()) {
       logf("commit tmp short %u/%u", (unsigned)w, (unsigned)cleaned.size());
       return false;
@@ -236,7 +268,7 @@ static size_t thumbSink(void* ctx, const uint8_t* data, size_t len) {
 
 /// Generate <cachePath>/thumb_400.bmp (same path/format the shelf reads).
 /// Best effort: any failure degrades to "no cover"; never affects the push.
-static void generatePushThumb(size_t byteCount) {
+static void generatePushThumb(size_t byteCount, const PushInstant& inst) {
   const std::string cacheDir = std::string("/.crosspoint/epub_") +
                                std::to_string(std::hash<std::string>{}(kBookPath));
   const std::string thumbPath = cacheDir + "/thumb_400.bmp";
@@ -244,16 +276,11 @@ static void generatePushThumb(size_t byteCount) {
     logf("thumb FAIL: mkdir");
     return;
   }
-  // Format push time as YYYY-MM-DD HH:MM (system clock synced by APK SET_TIME).
+  // S3cPF6: use the SAME captured instant as the document mtime — the bmp and
+  // the FAT timestamp now share one source (the push moment), so the classic
+  // (bmp) and vector (mtime) cover paths agree exactly.
   char timeText[32] = {0};
-  std::time_t now = std::time(nullptr);
-  struct tm lt {};
-  if (localtime_r(&now, &lt) == nullptr) {
-    std::snprintf(timeText, sizeof(timeText), "0000-00-00 00:00");
-  } else {
-    std::snprintf(timeText, sizeof(timeText), "%04d-%02d-%02d %02d:%02d",
-                  lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min);
-  }
+  formatInstant(inst, timeText);
   pushthumb::CoverInfo info{timeText, byteCount};
 
   // Remove any stale thumb first (generateThumbBmp's "exists -> skip" would
@@ -359,10 +386,11 @@ void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
     if (push_sink_core_take_commit(&g_core)) {
       uint32_t t0 = millis();
       std::string cleaned;
-      if (cleanPart(cleaned) && commitDocument(cleaned)) {
+      const PushInstant inst = capturePushInstant();  // S3cPF6: one instant for mtime + cover
+      if (cleanPart(cleaned) && commitDocument(cleaned, inst)) {
         logf("COMMIT ok bytes=%u ms=%u", (unsigned)cleaned.size(), (unsigned)(millis() - t0));
         Storage.remove(kPartPath);  // fully consumed — safe to drop
-        generatePushThumb(cleaned.size());  // S3b P4: best-effort cover; failure is silent
+        generatePushThumb(cleaned.size(), inst);  // S3b P4: best-effort cover; failure is silent
         g_pushCompleted.store(true, std::memory_order_release);  // S3b P3: let main loop auto-open
       } else {
         // Keep .part so a retry can rebuild the document without a re-push.

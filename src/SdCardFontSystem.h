@@ -8,6 +8,7 @@
 #include <VectorFontSupport.h>
 
 #if CROSSPOINT_VECTOR_FONTS
+#include <FontMap.h>    // S3cPF6 load-time codepoint->advanceWidth map
 #include <FontPsram.h>  // PsramVector for resident TTF bytes
 #endif
 
@@ -147,6 +148,12 @@ class SdCardFontSystem {
     unsigned long size = 0;
     bool present = false;
   };
+
+  // S3cPF6: build (or load from /.crosspoint/fontmap) the load-time
+  // codepoint->advanceWidth map for the regular TTF source. Returns nullptr on
+  // any failure — the caller then runs the ordinary fallback chain. Built once
+  // per distinct file (keyed by path-tag + mtime + size), never on the draw path.
+  std::shared_ptr<epd::FontMap> ensureFontMap(TtfSource& src, const std::string& keyTag);
 
   // Active TTF font (at most one reader-size vector family loaded at a time).
   std::unique_ptr<TtfEpdFont> ttf_;

@@ -732,8 +732,25 @@ bool TtfEpdFont::getAdvance(const uint32_t cp, const uint8_t style, uint16_t& ad
   bool have = false;
   const size_t faceIdx = static_cast<size_t>(&f - faces_);
   FaceLock lock(master_ ? master_ : this, faceIdx);
-  const freeink::font::FtFont::GlyphId gid = f.ft->glyphId(cp);
-  if (gid != 0 || (cp >= 0xFB00u && cp <= 0xFB04u && f.ligGid[cp - 0xFB00u] != 0)) {
+
+  // S3cPF6: consult the load-time advance map BEFORE any FreeType glyph load.
+  // A hit needs only one x_scale multiply (no FT_Load_Glyph, no SD seek into
+  // hmtx) and is byte-identical to metricsGlyph26_6().advance26_6. We store the
+  // result through the SAME advanceTableInsert path below, so the persistent
+  // hot table and measure/draw agreement are unchanged.
+  if (fontMap_) {
+    uint16_t rawAw = 0;
+    if (fontMap_->lookup(cp, rawAw)) {
+      int32_t adv26 = 0;
+      if (f.ft->unitsToAdvance26_6(rawAw, adv26)) {
+        adv = fp4::truncate26_6_to_4(adv26);
+        have = true;
+      }
+    }
+  }
+
+  const freeink::font::FtFont::GlyphId gid = have ? 0 : f.ft->glyphId(cp);
+  if (!have && (gid != 0 || (cp >= 0xFB00u && cp <= 0xFB04u && f.ligGid[cp - 0xFB00u] != 0))) {
     // 2) Vector glyph: ONE metrics load (FT_Load_Glyph, no FT_Render_Glyph).
     const freeink::font::FtFont::GlyphId useGid =
         gid ? gid : f.ligGid[cp - 0xFB00u];

@@ -731,6 +731,75 @@ void SdCardFontSystem::addTtfSources(TtfEpdFont& font) {
   }
 }
 
+// ---- S3cPF6: load-time advance map (codepoint -> raw hmtx advanceWidth) -----
+namespace {
+uint32_t fnv1a(const char* s) {
+  uint32_t h = 2166136261u;
+  for (; s && *s; ++s) { h ^= static_cast<uint8_t>(*s); h *= 16777619u; }
+  return h;
+}
+}  // namespace
+
+std::shared_ptr<epd::FontMap> SdCardFontSystem::ensureFontMap(TtfSource& src, const std::string& keyTag) {
+  if (!src.present || src.size == 0) return nullptr;
+  const uint32_t mtime = src.file ? src.file.modificationTime() : 0;
+  char fname[96];
+  std::snprintf(fname, sizeof(fname), "/.crosspoint/fontmap/%08x_%08x_%08x.fmap",
+                fnv1a(keyTag.c_str()), mtime, static_cast<unsigned>(src.size));
+  const std::string cacheDir = "/.crosspoint/fontmap";
+  const std::string cachePath = fname;
+
+  // 1) Try the on-disk cache first (~15 ms read-back, no table scan).
+  do {
+    if (!Storage.exists(cachePath.c_str())) break;
+    HalFile cf;
+    if (!Storage.openFileForRead("FMAP", cachePath, cf)) break;
+    const size_t len = cf.fileSize();
+    if (len < 16 || len > 512 * 1024) break;
+    std::vector<uint8_t> buf(len);
+    const bool ok = cf.seek(0) && static_cast<size_t>(cf.read(buf.data(), len)) == len;
+    cf.close();
+    if (!ok) break;
+    auto map = std::make_shared<epd::FontMap>();
+    if (map && map->load(buf.data(), buf.size()) && !map->empty()) {
+      LOG_INF("FMAP", "hit %s cps=%u", fname, map->count());
+      return map;
+    }
+    LOG_INF("FMAP", "corrupt cache %s — rebuilding", fname);
+  } while (false);
+
+  // 2) Build from the font's cmap+hmtx, reading via the prefix reader (which
+  //    serves the 1 MB head from PSRAM and reaches hmtx at 15 MB via SD).
+  auto map = std::make_shared<epd::FontMap>();
+  uint16_t upem = 0;
+  epd::FontMapStats stats;
+  const bool built = map->build(&SdCardFontSystem::prefixRead, &src, src.size, upem, stats);
+  if (!built || map->empty()) {
+    LOG_INF("FMAP", "build FAILED for %s — using ordinary fallback chain", keyTag.c_str());
+    return nullptr;  // graceful degradation, no crash / blank page
+  }
+  LOG_INF("FMAP", "built %s cps=%u supp=%u upem=%u psram=%uB",
+          keyTag.c_str(), stats.codepoints, stats.skippedSupp, upem, (unsigned)map->byteSize());
+
+  // 3) Persist the compact image (best effort; a write failure is non-fatal).
+  do {
+    if (!Storage.ensureDirectoryExists(cacheDir.c_str())) break;
+    Storage.remove(cachePath.c_str());
+    HalFile cf;
+    if (!Storage.openFileForWrite("FMAP", cachePath, cf)) break;
+    struct WriteCtx { HalFile* f; } wc{&cf};
+    const bool saved = map->save(&wc, [](void* ctx, const uint8_t* data, size_t len) -> bool {
+      auto* w = static_cast<WriteCtx*>(ctx);
+      return w->f->write(data, len) == len;
+    });
+    cf.flush();
+    cf.close();
+    if (!saved) Storage.remove(cachePath.c_str());
+  } while (false);
+
+  return map;
+}
+
 void SdCardFontSystem::setupTtfUiFallbacks(GfxRenderer& renderer) {
   if (!ttf_ || ttfFamily_.empty()) return;
 
@@ -855,6 +924,12 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
     return;
   }
   addTtfSources(*ttf_);
+  // S3cPF6: attach the load-time advance map for the regular face's source.
+  // Built/loaded ONCE per file (cache key = path-tag + mtime + size); a hit
+  // lets getAdvance skip the per-codepoint SD seek into hmtx. Failure returns
+  // nullptr and the font simply uses the ordinary FreeType/fallback path.
+  auto fontMap = ensureFontMap(ttfSources_[0], family.name);
+  ttf_->setFontMap(std::move(fontMap));
   const bool ok = ttf_->load(size, /*twoBit=*/true, cacheBytes, maxGlyphs);
   if (!ok) {
     // init failure is ambiguous (corrupt font vs. transient OOM inside

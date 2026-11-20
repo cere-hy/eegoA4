@@ -108,6 +108,11 @@ class HalFile : public Print {
   size_t fileSize();
   uint64_t fileSize64();
   uint32_t modificationTime();
+  // S3cPF6: explicitly stamp the file's FAT write/modify time. SdFat leaves a
+  // new file at FS_DEFAULT_DATE (compile-year-01-01) unless a global RTC
+  // callback is registered; this setter lets a caller stamp a precise time
+  // without that global side effect. year is absolute (e.g. 2026).
+  bool setModificationTime(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second);
   bool seek(size_t pos);
   bool seek64(uint64_t pos);
   bool seekCur(int64_t offset);
