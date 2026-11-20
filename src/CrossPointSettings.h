@@ -120,6 +120,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint8_t LEGACY_OPENDYSLEXIC = 2;
   static constexpr uint8_t STORED_BUILTIN_FAST = 3;  // new; distinct from legacy 0/2
   static constexpr uint8_t BUILTIN_FONT_COUNT = FONT_FAMILY_COUNT;
+  // S3c-cn+: PUSH reading font source. BUILTIN keeps the existing embedded
+  // face (zero-SD-seek, zero regression); FOLLOW_GLOBAL makes /PUSH.txt use
+  // the global reader face, inheriting its cross-book warm advance table.
+  // Default BUILTIN so existing users/behavior are untouched.
+  enum PUSH_FONT_MODE { PUSH_FONT_BUILTIN = 0, PUSH_FONT_FOLLOW_GLOBAL = 1, PUSH_FONT_MODE_COUNT };
+
   // Reader font size is a point size, not an enum slot — see fontPointSize.
   // Legacy 1.4-and-earlier files stored a 0..3 SMALL/MEDIUM/LARGE/EXTRA_LARGE
   // slot; fromJson() folds that range up (see LEGACY_FONT_SIZE_MAX).
@@ -326,6 +332,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t frontButtonRight = FRONT_HW_RIGHT;
   // Reader font settings
   uint8_t fontFamily = NOTOSANS;
+  // S3c-cn+: PUSH font source. 0=Built-in (default, unchanged), 1=Follow Global.
+  // Persisted via the generic settings loop (key "pushFontMode").
+  uint8_t pushFontMode = PUSH_FONT_BUILTIN;
   // Point size of the reader font. Only sizes the active family actually ships
   // are selectable; SdCardFontSystem::ensureLoaded() snaps this to the nearest
   // available size (and persists the snap) whenever the family changes.

@@ -73,6 +73,12 @@ void forEachBaseSetting(SettingVisitor visit, void* context) {
   emit(SettingInfo::Enum(StrId::STR_FONT_FAMILY, &CrossPointSettings::fontFamily, {StrId::STR_NOTO_SANS}, "fontFamily",
                          StrId::STR_CAT_READER)
            .withTextSettings());
+  // S3c-cn+: PUSH reading font source. Built-in (default) keeps the embedded
+  // zero-seek face; Follow Global reuses the global reader face/advance table.
+  emit(SettingInfo::Enum(StrId::STR_PUSH_FONT, &CrossPointSettings::pushFontMode,
+                         {StrId::STR_PUSH_FONT_BUILTIN, StrId::STR_PUSH_FONT_FOLLOW_GLOBAL}, "pushFontMode",
+                         StrId::STR_CAT_READER)
+           .withTextSettings());
   // Placeholder: the selectable sizes depend on the active font family, so
   // UI callers replace this entry with buildFontSizeSetting(). It only
   // fixes the setting's position in the Reader category.

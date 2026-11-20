@@ -361,8 +361,15 @@ bool EpubReaderActivity::loadBook() {
 
 int EpubReaderActivity::effectiveReaderFontId() const {
   if (bookPath == "/PUSH.txt") {
-    const int id = sdFontSystem.pushFontId();
-    if (id != 0) return id;
+    // S3c-cn+: default PUSH_FONT_BUILTIN keeps the existing embedded face —
+    // zero regression. FOLLOW_GLOBAL routes PUSH onto the global reader face,
+    // inheriting its cross-book-warm advance table (per-face, see TtfEpdFont).
+    // When the global family is Built-in (Fast), getReaderFontId() already
+    // resolves to the same push face, so this mode is equivalent to Built-in.
+    if (SETTINGS.pushFontMode == CrossPointSettings::PUSH_FONT_BUILTIN) {
+      const int id = sdFontSystem.pushFontId();
+      if (id != 0) return id;
+    }
   }
   return SETTINGS.getReaderFontId();
 }
