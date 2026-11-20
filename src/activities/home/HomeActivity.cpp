@@ -97,6 +97,30 @@ void HomeActivity::fillCoverGridFromLibrary() {
   }
 }
 
+void HomeActivity::appendPushToCoverGrid() {
+  // b65-s3c-pf3 P1: surface the pushed document as the LAST grid tile (the
+  // grid shows books[1..], books[0] is the featured card) so it never displaces
+  // the "recently read" ordering. Only when a push actually exists and is not
+  // already in the list; capacity is bounded by CoverGridHomeUi::MAX_BOOKS.
+  constexpr const char* kPushPath = "/PUSH.txt";
+  if (!Storage.exists(kPushPath)) return;
+  if (recentBooks.size() >= static_cast<size_t>(CoverGridHomeUi::MAX_BOOKS)) return;
+  if (std::any_of(recentBooks.begin(), recentBooks.end(),
+                  [](const RecentBook& b) { return b.path == kPushPath; }))
+    return;
+
+  RecentBook pushBook;
+  pushBook.path = kPushPath;
+  pushBook.title = tr(STR_PUSH);
+  // PUSH's generated cover shares the Epub cache path/format, so deriving it
+  // through Epub() gives the exact thumb_400.bmp resolveGridCoverPaths expects.
+  {
+    auto epub = makeUniqueNoThrow<Epub>(kPushPath, "/.crosspoint");
+    if (epub) pushBook.coverBmpPath = epub->getThumbBmpPath();
+  }
+  recentBooks.push_back(std::move(pushBook));
+}
+
 void HomeActivity::resolveGridCoverPaths() {
   for (auto& book : recentBooks) {
     if (!book.coverBmpPath.empty()) continue;
@@ -248,6 +272,7 @@ void HomeActivity::onEnter() {
   hasContinueReading = !recentBooks.empty();
   if (coverGridUi) {
     fillCoverGridFromLibrary();
+    appendPushToCoverGrid();  // b65-s3c-pf3 P1: PUSH tile at the end of the grid
     resolveGridCoverPaths();
     const HomeMenuItem slot = slotItem();
     coverGridUi->begin(recentBooks,
@@ -554,7 +579,7 @@ void HomeActivity::render(RenderLock&&) {
   // Build menu items dynamically
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
                                         tr(STR_SETTINGS_TITLE), tr(STR_PUSH)};
-  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings, Text};
+  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings, Push};
 
   if (slotItem() != HomeMenuItem::NONE) {
     menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));

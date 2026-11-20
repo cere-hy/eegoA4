@@ -91,6 +91,9 @@ class HomeActivity final : public Activity {
   void loadRecentBooks(int maxBooks);
   void loadRecentCovers(int coverHeight);
   void fillCoverGridFromLibrary();
+  // b65-s3c-pf3 P1: append /PUSH.txt as a virtual tile to the cover grid so
+  // the pushed document is reachable from the shelf with its generated cover.
+  void appendPushToCoverGrid();
   void resolveGridCoverPaths();
   void loadGridCover(RecentBook& book, int height, bool& showingLoading, Rect& popupRect);
 

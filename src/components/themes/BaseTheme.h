@@ -147,7 +147,8 @@ enum UIIcon {
   Hotspot,
   Bookmark,
   Usb,
-  Blocks
+  Blocks,
+  Push  // b65-s3c-pf3 P1: PUSH main-menu entry (inbox icon in Lyra; ignored by text-only themes)
 };
 
 // Default theme implementation (Classic Theme)

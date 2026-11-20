@@ -25,6 +25,12 @@ namespace {
 // Tab labels for Font | Size | Layout | Style.
 constexpr StrId TAB_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_LAYOUT, StrId::STR_STYLE};
 
+// b65-s3c-pf3 D1: PUSH font source picker appended as its own row at the end
+// of the Family tab (after the fonts_ list). Two choices map 1:1 to the
+// pushFontMode persisted value: 0=Built-in, 1=Follow Global.
+constexpr StrId PUSH_FONT_MODE_IDS[] = {StrId::STR_PUSH_FONT_BUILTIN, StrId::STR_PUSH_FONT_FOLLOW_GLOBAL};
+static_assert(std::size(PUSH_FONT_MODE_IDS) == CrossPointSettings::PUSH_FONT_MODE_COUNT);
+
 constexpr StrId LAYOUT_ROW_NAME_IDS[] = {
     StrId::STR_LINE_SPACING,          StrId::STR_WORD_SPACING, StrId::STR_CHARACTER_SPACING, StrId::STR_EXTRA_SPACING,
     StrId::STR_PARAGRAPH_INDENTATION, StrId::STR_ALIGNMENT,    StrId::STR_SCREEN_MARGIN};
@@ -122,7 +128,8 @@ void TextSettingsActivity::rebuildRowItems() {
     fui::ListItem item;
     switch (tab_) {
       case Tab::Family:
-        item.label = fonts_[i].name.c_str();
+        // b65-s3c-pf3 D1: last row is the PUSH font picker, not a font.
+        item.label = (i < static_cast<int>(fonts_.size())) ? fonts_[i].name.c_str() : I18N.get(StrId::STR_PUSH_FONT);
         break;
       case Tab::Size:
         item.label = sizes_[i].name.c_str();
@@ -229,7 +236,16 @@ void TextSettingsActivity::buildScreen(UiScreen& screen) {
   for (int i = 0; i < count; i++) {
     switch (tab_) {
       case Tab::Family:
-        rowValues_[i] = (i == currentFamilyIndex_) ? tr(STR_SELECTED) : "";
+        // b65-s3c-pf3 D1: font rows keep the selection marker; the trailing
+        // PUSH row shows the active source (Built-in / Follow Global).
+        if (i < static_cast<int>(fonts_.size())) {
+          rowValues_[i] = (i == currentFamilyIndex_) ? tr(STR_SELECTED) : "";
+        } else {
+          const uint8_t mode = SETTINGS.pushFontMode < CrossPointSettings::PUSH_FONT_MODE_COUNT
+                                   ? SETTINGS.pushFontMode
+                                   : CrossPointSettings::PUSH_FONT_BUILTIN;
+          rowValues_[i] = I18N.get(PUSH_FONT_MODE_IDS[mode]);
+        }
         break;
       case Tab::Size:
         rowValues_[i] = (i == currentSizeIndex_) ? tr(STR_SELECTED) : "";
@@ -359,7 +375,20 @@ void TextSettingsActivity::applyFamily(int listIndex) {
 void TextSettingsActivity::activateRow(int row) {
   switch (tab_) {
     case Tab::Family:
-      if (row != currentFamilyIndex_) {
+      // b65-s3c-pf3 D1: trailing row is the PUSH font source picker — a
+      // two-choice OptionPopup (same interaction as the Size/Layout pickers),
+      // NOT a font list entry. Selection maps 1:1 to pushFontMode 0/1.
+      if (row == static_cast<int>(fonts_.size())) {
+        const int mode = SETTINGS.pushFontMode < CrossPointSettings::PUSH_FONT_MODE_COUNT
+                             ? SETTINGS.pushFontMode
+                             : CrossPointSettings::PUSH_FONT_BUILTIN;
+        optionPopup_.show(StrId::STR_PUSH_FONT, PUSH_FONT_MODE_IDS,
+                          static_cast<int>(std::size(PUSH_FONT_MODE_IDS)), mode, [](int idx) {
+                            SETTINGS.pushFontMode = static_cast<uint8_t>(idx);
+                            SETTINGS.saveToFile();  // persist immediately, like every other picker
+                          });
+        requestUpdate();
+      } else if (row != currentFamilyIndex_) {
         applyFamily(row);
         // Persist immediately (like SettingsActivity's per-change saves): the
         // parent's result callback only runs on a normal finish(), so relying
@@ -553,7 +582,8 @@ void TextSettingsActivity::switchTab(const int direction) {
 int TextSettingsActivity::listCount() const {
   switch (tab_) {
     case Tab::Family:
-      return static_cast<int>(fonts_.size());
+      // b65-s3c-pf3 D1: fonts_ + one "PUSH 字体" picker row at the end.
+      return static_cast<int>(fonts_.size()) + 1;
     case Tab::Size:
       return static_cast<int>(sizes_.size());
     case Tab::Layout:

@@ -19,6 +19,7 @@
 #include "components/icons/folder.h"
 #include "components/icons/hotspot.h"
 #include "components/icons/library.h"
+#include "components/icons/push.h"
 #include "components/icons/recent.h"
 #include "components/icons/settings2.h"
 #include "components/icons/transfer.h"
@@ -59,6 +60,8 @@ const uint8_t* iconForName(UIIcon icon) {
       return nullptr;  // B2: 书签图标资源已删, 枚举保留兼容, 不画
     case UIIcon::Blocks:
       return BlocksIcon;
+    case UIIcon::Push:
+      return PushIcon;  // b65-s3c-pf3 P1: PUSH inbox icon (was UIIcon::Text → nullptr → no icon)
     default:
       return nullptr;
   }

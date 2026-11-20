@@ -90,6 +90,11 @@ int SdCardFontSystem::ensurePushFont(GfxRenderer& renderer) {
   const uint8_t pt = SETTINGS.fontPointSize;
   if (pushTtf_ && pushPt_ == pt && pushFontId_ != 0) return pushFontId_;
 
+  // b65-s3c-pf3 D2: log every embedded-face (re)build with its cause so the
+  // next push tells "first load" from "point-size change" without guessing.
+  LOG_DBG("SDFS", "push face rebuilt: pt=%u reason=%s", static_cast<unsigned>(pt),
+          pushTtf_ ? "字号变化" : "首次");
+
   if (pushTtf_) {
     renderer.unregisterTtfFont(pushFontId_);
     renderer.removeFont(pushFontId_);

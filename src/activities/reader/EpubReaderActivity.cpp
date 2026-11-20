@@ -360,6 +360,7 @@ bool EpubReaderActivity::loadBook() {
 }
 
 int EpubReaderActivity::effectiveReaderFontId() const {
+  int resolved = SETTINGS.getReaderFontId();
   if (bookPath == "/PUSH.txt") {
     // S3c-cn+: default PUSH_FONT_BUILTIN keeps the existing embedded face —
     // zero regression. FOLLOW_GLOBAL routes PUSH onto the global reader face,
@@ -368,10 +369,14 @@ int EpubReaderActivity::effectiveReaderFontId() const {
     // resolves to the same push face, so this mode is equivalent to Built-in.
     if (SETTINGS.pushFontMode == CrossPointSettings::PUSH_FONT_BUILTIN) {
       const int id = sdFontSystem.pushFontId();
-      if (id != 0) return id;
+      if (id != 0) resolved = id;
     }
   }
-  return SETTINGS.getReaderFontId();
+  // b65-s3c-pf3 D2: single-exit log so the next push shows which face a book
+  // actually resolved to and the active PUSH source, no more guessing.
+  LOG_DBG("ERS", "reader font: book=%s mode=%u fontId=%d", bookPath.c_str(),
+          static_cast<unsigned>(SETTINGS.pushFontMode), resolved);
+  return resolved;
 }
 
 ReaderRenderSpec EpubReaderActivity::readerRenderSpecForCurrentBook(const uint16_t w, const uint16_t h) const {
