@@ -88,3 +88,12 @@
 2. **【账·上游漂移】** B1 app 较 P4 +52,624 B = 旧基线之后 crosspoint develop 已演进的**上游漂移实据**，构成 B2 路径普查令的依据。
 3. **【规则·行号锚定锚点 commit】** 计划中 file:line 凡采自 HEAD 者，落码前必须对其所声明的锚点 commit 复核（白玉书三端互证基准）。已正确示范：pico-plus 锚点无 `push_part.c`（分片逻辑在 `push_sink.c` 2322 行）；B2 裁剪清单录自旧树，须在现树 HEAD 普查存在性后先报后删。
 4. **【规则·语义版本前导零】** platformio 规范名 `espressif32@55.03.311` 被语义版本解析器拒（前导零 `03` 非法）；本地覆盖改用 `file:///root/.platformio/platforms/espressif32`，绕开 URL 重装 + 版本解析双坑。
+
+## S3c+++ (b65-s3c-cn) 指纹
+
+- commit `2f16dbc6`（7 文件 / +953 / −25；前一干净基线 `f56449fd`）
+- app sha256 `6ab56923c6971a38c35d1eeb8c1010d1620d208ad95a32148b9e872da94cd260`（6,020,320 B）
+- factory sha256 `bfdee546d1561e275ed9fcedfa3ee676fb5266fadfe316236aeb422239a1c431`（6,085,856 B；factory−app=65,536）
+- A 级双冷编（双删 .pio/build + .cache、无管道 source、`SOURCE_DATE_EPOCH=1794813449` 断言、PIPESTATUS[0] 真实退出码）：app/factory/elf/MANIFEST 四产物逐字节 IDENTICAL，CMP_RC=0，REPRODUCIBLE OK
+- 关键能力：UI 字符串级链式 fallback（ubuntu 点阵 → SD 用户字体 → 内置 builtin.ttf variant → 占位符，UiFallbackChain.h device/host 同码）；三档常驻 UI variant 8/10/12pt（16KB/384 each）复用 installInto 的 PIF1 二级；中文语言包 647 key 全译、CHINESE/zh-Hans、36 语言、切换即生效
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-cn_factory.bin`（待真机验收，非日常用件）
