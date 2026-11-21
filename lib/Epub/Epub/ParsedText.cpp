@@ -151,10 +151,16 @@ std::vector<size_t> explicitHyphenBreakByteOffsets(const std::string& text, cons
 // exceeds maxGap the whole line falls back to flush-left (justifyExtra = 0),
 // rather than clamping a subset of gaps (which would shift the line off margin).
 // maxGap <= 0 disables the cap (legacy behavior for callers without a font metric).
+// S3cPF8b: symmetric lower bound — when the line is slightly over-wide (perGap < 0),
+// a negative extra would pull glyphs back and overprint each other ("认‛识不").
+// Mirroring the half-glyph upper cap, an out-of-range gap makes the whole line fall
+// back to flush-left instead of forcing justify. Both bounds mean "give up justify,
+// never stretch/squeeze through the limit".
 int computeJustifyExtra(const int spareSpace, const size_t gapCount, const int maxGap = 0) {
   if (gapCount < MIN_JUSTIFY_GAPS || spareSpace <= 0) return 0;
   const int perGap = spareSpace / static_cast<int>(gapCount);
-  if (maxGap > 0 && perGap > maxGap) return 0;
+  if (perGap < 0) return 0;              // S3cPF8b: over-wide line -> left align, no overprint
+  if (maxGap > 0 && perGap > maxGap) return 0;  // S3cPF8: sparse line -> left align, no big gaps
   return perGap;
 }
 

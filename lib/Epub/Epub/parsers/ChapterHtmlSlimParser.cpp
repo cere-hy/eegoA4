@@ -17,6 +17,7 @@
 #include <new>
 
 #include "Epub.h"
+#include "Epub/CjkWhitespace.h"
 #include "Epub/Page.h"
 #include "Epub/VisibleTextUtils.h"
 #include "Epub/converters/ImageDecoderFactory.h"
@@ -776,6 +777,9 @@ void ChapterHtmlSlimParser::breakTextLine(const BlockStyle& style) {
 void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle, const bool paragraphEnd) {
   if (stopRequested) return;
   nextWordContinues = false;  // New block = new paragraph, no continuation
+  // S3cPF8b: a whitespace run cannot straddle a paragraph/block boundary. Drop any
+  // left-codepoint stashed by characterData() so it can't strip across blocks.
+  pendingSpaceLeftCp = 0;
   if (currentTextBlock) {
     // already have a text block running and it is empty - just reuse it
     if (currentTextBlock->isEmpty()) {
@@ -2410,6 +2414,19 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       nextCodepointOffset++;
     }
 
+    // S3cPF8b: resolve a pending whitespace run as soon as its right-hand
+    // codepoint is known. This is the single decision funnel shared by bare-text
+    // runs (both chars in one callback) and span-boundary runs (right char arrives
+    // in a later callback). Placed before every non-space branch (NBSP, BOM, normal
+    // append) so a pending run is always consumed exactly once. The left codepoint
+    // was stashed when the run began; see the isWhitespace() branch below.
+    if (!isWhitespace(s[i]) && self->pendingSpaceLeftCp != 0) {
+      const auto* rightPtr = reinterpret_cast<const unsigned char*>(s + i);
+      const uint32_t rightCp = utf8NextCodepoint(&rightPtr);
+      self->nextWordContinues = CjkWhitespace::shouldStripBetween(self->pendingSpaceLeftCp, rightCp);
+      self->pendingSpaceLeftCp = 0;
+    }
+
     // Initial-letter capture: a drop-cap span takes all of its text; ::first-letter takes
     // leading punctuation plus the block's first letter.
     const bool capturingSpan = self->dropCap.spanDepth >= 0;
@@ -2449,13 +2466,23 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
     }
 
     if (isWhitespace(s[i])) {
-      // Currently looking at whitespace, if there's anything in the partWordBuffer, flush it
+      // S3cPF8b: remember the last codepoint to the LEFT of this whitespace run,
+      // before the buffer holding it is flushed. Consecutive spaces reach here
+      // repeatedly but pendingSpaceLeftCp is stashed only once (first space), so a
+      // run collapses naturally. The right-hand character resolves the boundary at
+      // the top of a later iteration (or a later callback for span boundaries).
+      if (self->pendingSpaceLeftCp == 0 && self->partWordBufferIndex > 0) {
+        int back = self->partWordBufferIndex - 1;
+        while (back > 0 && (static_cast<uint8_t>(self->partWordBuffer[back]) & 0xC0) == 0x80) --back;
+        const auto* leftPtr = reinterpret_cast<const unsigned char*>(self->partWordBuffer + back);
+        self->pendingSpaceLeftCp = utf8NextCodepoint(&leftPtr);
+      }
       if (self->partWordBufferIndex > 0) {
         self->flushPartWordBuffer();
       }
-      // Whitespace is a real word boundary — reset continuation state
-      self->nextWordContinues = false;
-      // Skip the whitespace char
+      // Do NOT force nextWordContinues=false here: the right-hand codepoint decides
+      // whether this run is stripped (CJK|CJK) or kept as one space (Latin/digit).
+      // Skip the whitespace char itself.
       continue;
     }
 
