@@ -17,6 +17,7 @@
 #include <new>
 
 #include "Epub.h"
+#include "Epub/CjkWhitespace.h"
 #include "Epub/Page.h"
 #include "Epub/VisibleTextUtils.h"
 #include "Epub/converters/ImageDecoderFactory.h"
@@ -776,6 +777,13 @@ void ChapterHtmlSlimParser::breakTextLine(const BlockStyle& style) {
 void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle, const bool paragraphEnd) {
   if (stopRequested) return;
   nextWordContinues = false;  // New block = new paragraph, no continuation
+  // S3cPF8d: a new text block is a paragraph boundary — clear both the persistent
+  // left neighbour and any open whitespace run so leading whitespace cannot inherit
+  // the previous paragraph's last codepoint. flushPartWordBuffer() deliberately does
+  // NOT clear these (it is a mid-paragraph token flush, not a boundary).
+  lastVisibleCp = 0;
+  pendingSpaceLeftCp = 0;
+  hasPendingSpace = false;
   if (currentTextBlock) {
     // already have a text block running and it is empty - just reuse it
     if (currentTextBlock->isEmpty()) {
@@ -2406,12 +2414,34 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
   uint32_t nextCodepointOffset = callbackVisibleOffset;
   for (int i = 0; i < len; i++) {
     const uint32_t codepointOffset = nextCodepointOffset;
-    if (countVisibleOffsets && (static_cast<uint8_t>(s[i]) & 0xC0) != 0x80) {
+    const bool isLeadByte = (static_cast<uint8_t>(s[i]) & 0xC0) != 0x80;
+    if (countVisibleOffsets && isLeadByte) {
       nextCodepointOffset++;
     }
 
+    // Addendum clause 39/40: decode the current codepoint (lead byte only) once,
+    // up front, so both the right-codepoint-eligibility check and the regular append
+    // can share it. A continuation byte never decodes (would yield garbage).
+    uint32_t curCp = 0;
+    if (isLeadByte) {
+      const auto* cpPtr = reinterpret_cast<const unsigned char*>(s + i);
+      curCp = utf8NextCodepoint(&cpPtr);
+      // Addendum clause 47 (7): U+3000 ideographic space is a semantic space kept
+      // as content (isWhitespace() does not classify it); count it here on its lead
+      // byte. U+00A0/U+202F are counted in their dedicated branches below.
+      if (curCp == 0x3000) ++self->diagWsSemantic;
+    }
+    // Codepoints that are NOT truly in the layout text flow: BOM, zero-width
+    // chars, and footnote display text. Per clause 39 they must be skipped — no
+    // resolve, no lastVisibleCp update.
+    const bool isZeroWidth = (curCp == 0x200B || curCp == 0x200C || curCp == 0x200D);
+    const bool excludedFromFlow = (curCp == 0xFEFF) || isZeroWidth || self->insideFootnoteLink;
+
     // Initial-letter capture: a drop-cap span takes all of its text; ::first-letter takes
     // leading punctuation plus the block's first letter.
+    // Addendum clause 40: the dropcap capture path is a bypass — it does NOT change
+    // lastVisibleCp and does NOT resolve a pending run. Placing this branch before
+    // resolve() means its `continue` naturally skips both.
     const bool capturingSpan = self->dropCap.spanDepth >= 0;
     if (capturingSpan || (self->dropCap.firstLetterPending && !isWhitespace(s[i]) && self->partWordBufferIndex == 0 &&
                           !self->insideFootnoteLink && self->currentTextBlock->isEmpty())) {
@@ -2423,12 +2453,28 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
         const int codepointLength = std::min(len - i, lead < 0x80 ? 1 : (lead < 0xE0 ? 2 : (lead < 0xF0 ? 3 : 4)));
         if (self->captureDropCapCodepoint(s + i, codepointLength)) {
           i += codepointLength - 1;
-          continue;
+          continue;  // bypass: no resolve, no lastVisibleCp update
         }
       }
     }
 
+    // S3cPF8d: resolve a pending CJK whitespace run at the first non-space
+    // right-hand codepoint that is genuinely in the layout flow. The left neighbour
+    // comes from pendingSpaceLeftCp (buffer-independent — PF8b read the buffer tail
+    // and failed at every span). Excluded per clause 39: BOM, zero-width, footnote
+    // text; dropcap already `continue`d above. Only a lead byte may resolve.
+    if (!isWhitespace(s[i]) && isLeadByte && !excludedFromFlow && self->hasPendingSpace) {
+      ++self->diagWsResolve;
+      const bool wasContinues = self->nextWordContinues;
+      self->nextWordContinues = CjkWhitespace::shouldStrip(self->pendingSpaceLeftCp, curCp);
+      if (wasContinues && !self->nextWordContinues) ++self->diagWsOverride;
+      self->pendingSpaceLeftCp = 0;
+      self->hasPendingSpace = false;
+    }
+
     if (self->effectivePreserveWhitespace && isWhitespace(s[i])) {
+      // Addendum clause 47 (6): whitespace bypassed entirely by preserve mode.
+      ++self->diagWsPreserve;
       self->flushPartWordBuffer();
       self->currentTextBlock->suppressFirstLineIndent();
       if (s[i] == '\n') {
@@ -2449,11 +2495,31 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
     }
 
     if (isWhitespace(s[i])) {
+      // Addendum clause 47 (1): every ordinary whitespace char counted separately
+      // from semantic spaces (which never reach this branch).
+      ++self->diagWsSpaces;
       // Currently looking at whitespace, if there's anything in the partWordBuffer, flush it
       if (self->partWordBufferIndex > 0) {
         self->flushPartWordBuffer();
       }
-      // Whitespace is a real word boundary — reset continuation state
+      // S3cPF8d: open a whitespace run and stash the left neighbour ONCE, from the
+      // buffer-independent lastVisibleCp. PF8b read partWordBuffer's tail here, which
+      // is empty at every span boundary (flushPartWordBuffer zeroed it) -> 100% miss
+      // on styles-on EPUBs. Consecutive spaces collapse: only the first stashes.
+      if (!self->hasPendingSpace) {
+        // Addendum clause 47 (2): a new run is opened.
+        ++self->diagWsRuns;
+        self->pendingSpaceLeftCp = self->lastVisibleCp;
+        self->hasPendingSpace = true;
+        // Addendum clause 47 (3/4): miss counts ONLY ordinary whitespace whose left
+        // neighbour is missing. Semantic spaces are counted separately (item 7).
+        if (self->lastVisibleCp != 0) {
+          ++self->diagWsHit;
+        } else {
+          ++self->diagWsMiss;
+        }
+      }
+      // Conservative default until resolve() decides from the right codepoint.
       self->nextWordContinues = false;
       // Skip the whitespace char
       continue;
@@ -2491,6 +2557,14 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
       self->nextWordContinues = true;  // Next real word attaches to this space (no break).
 
+      // S3cPF8d: the no-break space is a visible, semantic space that must not take
+      // part in CJK whitespace judgement. Make it the left neighbour so a following
+      // ordinary space sees 0xA0 (not the Chinese char before the NBSP) and keeps a
+      // single space. flushPartWordBuffer() above must NOT clear lastVisibleCp.
+      // Addendum clause 47 (7): counted as a semantic space, never as a miss.
+      ++self->diagWsSemantic;
+      self->lastVisibleCp = 0xA0;
+
       i++;  // Skip the second byte (0xA0)
       continue;
     }
@@ -2510,6 +2584,11 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       self->flushPartWordBuffer();
 
       self->nextWordContinues = true;
+
+      // S3cPF8d: same as U+00A0 — U+202F (0x202F) becomes the left neighbour so it
+      // never takes part in CJK whitespace judgement. Clause 47 (7): semantic space.
+      ++self->diagWsSemantic;
+      self->lastVisibleCp = 0x202F;
 
       i += 2;  // Skip the remaining two bytes (0x80 0xAF)
       continue;
@@ -2569,6 +2648,14 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       self->partWordVisibleOffset = codepointOffset;
     }
     self->partWordBuffer[self->partWordBufferIndex++] = s[i];
+
+    // S3cPF8d: update the buffer-independent left neighbour ONLY on a complete
+    // codepoint (lead byte — continuation bytes never trigger this), and only for
+    // codepoints genuinely in the layout flow (clause 39: BOM / zero-width /
+    // footnote text are excluded). curCp was decoded once at the loop top.
+    if (isLeadByte && !excludedFromFlow) {
+      self->lastVisibleCp = curCp;
+    }
   }
 
   // Block creation failed (OOM): nothing to soft-flush.
@@ -2850,6 +2937,13 @@ ChapterHtmlSlimParser::~ChapterHtmlSlimParser() { abortParse(); }
 bool ChapterHtmlSlimParser::beginParse() {
   stopRequested = false;
   htmlEnded_ = false;
+  // S3cPF8d: reset per-section whitespace state (addendum clause 41) and all seven
+  // diagnostic counters (clause 47).
+  diagWsSpaces = diagWsRuns = diagWsHit = diagWsMiss = diagWsResolve = diagWsPreserve = diagWsSemantic = 0;
+  diagWsOverride = 0;
+  lastVisibleCp = 0;
+  pendingSpaceLeftCp = 0;
+  hasPendingSpace = false;
   // Initialize block style stack with a root entry representing "no ancestor block elements".
   // The user's paragraph alignment is set as the default so child elements without explicit
   // text-align inherit it correctly through getCombinedBlockStyle.
@@ -2921,13 +3015,15 @@ ChapterHtmlSlimParser::ParseStatus ChapterHtmlSlimParser::parseStep() {
     return ParseStatus::Error;
   }
 
-  void* const buf = XML_GetBuffer(xmlParser_, PARSE_BUFFER_SIZE);
+  // Addendum clause 43: chunk size is injectable for cross-chunk UTF-8 tests;
+  // default remains PARSE_BUFFER_SIZE so device behaviour is unchanged.
+  void* const buf = XML_GetBuffer(xmlParser_, parseChunkSize);
   if (!buf) {
     LOG_ERR("EHP", "Couldn't allocate memory for buffer");
     return ParseStatus::Error;
   }
 
-  const size_t len = parseFile_.read(buf, PARSE_BUFFER_SIZE);
+  const size_t len = parseFile_.read(buf, parseChunkSize);
 
   if (len == 0 && parseFile_.available() > 0) {
     LOG_ERR("EHP", "File read error");
@@ -2977,6 +3073,12 @@ bool ChapterHtmlSlimParser::finishParse() {
   }
 
   if (xmlParser_) {
+    // S3cPF8d: one [EHP] ws line per section in debug builds. Seven counters per
+    // addendum clause 47 (spaces/runs/hit/miss/resolve/preserve/semantic), hand-
+    // reconciled in the receipt (no forced conservation). style=1 on, 0 off.
+    LOG_DBG("EHP", "[EHP] ws: spaces=%u runs=%u hit=%u miss=%u resolve=%u preserve=%u semantic=%u style=%u",
+            diagWsSpaces, diagWsRuns, diagWsHit, diagWsMiss, diagWsResolve, diagWsPreserve, diagWsSemantic,
+            static_cast<unsigned>(embeddedStyle ? 1 : 0));
     LOG_DBG("EHP", "Time to parse and build pages: %lu ms", millis() - parseStartTime_);
     destroyXmlParser(xmlParser_);
     xmlParser_ = nullptr;

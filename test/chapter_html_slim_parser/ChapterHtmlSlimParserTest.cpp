@@ -2138,6 +2138,11 @@ TEST(TextSpacingLayout, CachedPageRestoresSpacing) {
 }
 
 TEST_F(ChapterHtmlSlimParserTest, ParserAppliesTextSpacingToParagraphs) {
+  // S3cPF8d: the CJK space in "一二三 四五" is now absorbed by the whitespace
+  // cleaner (nextWordContinues=true), so it no longer produces the 150% wordSpacing
+  // gap the old assertion measured. Tracking (-1) still applies uniformly. This
+  // test now pins that the cleaner changes ONLY the gap, not the tracking — the
+  // CJK-cleaning semantics themselves are covered by RealEpubFullChainTest.cpp.
   parser.setTextSpacing(-1, 150);
   parser.beginParse();
   ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
@@ -2153,8 +2158,9 @@ TEST_F(ChapterHtmlSlimParserTest, ParserAppliesTextSpacingToParagraphs) {
     ++lines;
     ASSERT_EQ(block.wordCount(), 5);
     EXPECT_EQ(block.getBlockStyle().characterSpacing, -1);
-    EXPECT_EQ(block.wordXpos(1) - block.wordXpos(0), 7);   // 8 px glyph, -1 px tracking
-    EXPECT_EQ(block.wordXpos(3) - block.wordXpos(2), 14);  // glyph plus 150% of a 4 px space
+    EXPECT_EQ(block.wordXpos(1) - block.wordXpos(0), 7);  // 8 px glyph, -1 px tracking
+    // The absorbed CJK space no longer gets the 150% wordSpacing gap: tracking only.
+    EXPECT_EQ(block.wordXpos(3) - block.wordXpos(2), 7);
   }
   EXPECT_EQ(lines, 1u);
 }

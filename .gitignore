@@ -36,3 +36,7 @@ lib/EpdFont/scripts/output/
 sdkconfig.sticky
 sdkconfig.x4pro
 flake.*
+# S3cPF8d: copyrighted real-book EPUBs are user-supplied and must NOT be committed.
+# Structural-equivalent synthetic fixtures (*_structure.xhtml) ARE committed for CI.
+test/chapter_html_slim_parser/fixtures/real/*.epub
+test/chapter_html_slim_parser/fixtures/real/*.xhtml

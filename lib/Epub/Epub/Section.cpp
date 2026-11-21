@@ -85,7 +85,10 @@ namespace {
 // v75: Headings are not hyphenated.
 // v76: S3cPF8 — justified CJK gaps capped at half a glyph; old cached pages
 //      (built with uncapped justification) must be invalidated and rebuilt.
-constexpr uint8_t SECTION_FILE_VERSION = 76;
+// v77: S3cPF8d — CJK adjacent-whitespace cleaning now absorbs spaces between
+//      Han characters (buffer-independent left neighbour). Old cached pages were
+//      built with the pre-clean word boundaries and must be rebuilt.
+constexpr uint8_t SECTION_FILE_VERSION = 77;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

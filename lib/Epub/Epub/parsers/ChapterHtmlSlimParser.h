@@ -44,6 +44,30 @@ class ChapterHtmlSlimParser {
   char partWordBuffer[MAX_WORD_SIZE + 1] = {};
   int partWordBufferIndex = 0;
   bool nextWordContinues = false;  // true when next flushed word attaches to previous (inline element boundary)
+  // S3cPF8d: CJK whitespace cleaning state. Unlike PF8b (which read the left
+  // codepoint back out of partWordBuffer and therefore failed 100% at span
+  // boundaries where flushPartWordBuffer() had already zeroed the buffer), the
+  // left neighbour is tracked here as a standalone codepoint that survives every
+  // flush and every characterData() callback. 0 = no visible left neighbour.
+  uint32_t lastVisibleCp = 0;
+  uint32_t pendingSpaceLeftCp = 0;  // left neighbour stashed at the first space of a run
+  // Addendum clause 38: the "is a run open" flag is a BOOLEAN, never inferred from
+  // pendingSpaceLeftCp's value (0 is a legitimate left neighbour at line start).
+  bool hasPendingSpace = false;
+  // Addendum clause 43: expat feed chunk size (host tests shrink to 1..3 bytes to
+  // force UTF-8 codepoints to straddle XML_ParseBuffer calls). Default = 1024.
+  size_t parseChunkSize = 1024;
+  // S3cPF8d diagnostic instrumentation (NON-FUNCTIONAL). Seven counters per
+  // addendum clause 47, reported via [EHP] ws: in debug builds and reconciled
+  // by hand in the receipt (no forced conservation equation).
+  uint32_t diagWsSpaces = 0;    // (1) ordinary whitespace characters seen
+  uint32_t diagWsRuns = 0;      // (2) whitespace runs opened
+  uint32_t diagWsHit = 0;       // (3) run's left codepoint stashed (lastVisibleCp != 0)
+  uint32_t diagWsMiss = 0;      // (4) ordinary whitespace with no left codepoint (0)
+  uint32_t diagWsResolve = 0;   // (5) resolve funnel fired on a right-hand codepoint
+  uint32_t diagWsPreserve = 0;  // (6) whitespace bypassed by effectivePreserveWhitespace
+  uint32_t diagWsSemantic = 0;  // (7) semantic spaces (U+00A0 / U+202F / U+3000) kept
+  uint32_t diagWsOverride = 0;  // extra: resolve flipped a pre-set true to false
   std::unique_ptr<ParsedText> currentTextBlock = nullptr;
   // Ruby text state
   bool inRuby = false;
@@ -324,6 +348,19 @@ class ChapterHtmlSlimParser {
         tocAnchors(std::move(tocAnchors)) {}
 
   ~ChapterHtmlSlimParser();
+  // S3cPF8d: read the per-section whitespace counters without friend/private hacks.
+  void diagWsCounters(uint32_t& hit, uint32_t& miss, uint32_t& resolve, uint32_t& overrideC) const {
+    hit = diagWsHit; miss = diagWsMiss; resolve = diagWsResolve; overrideC = diagWsOverride;
+  }
+  // Addendum clause 47: all seven counters for hand reconciliation.
+  void diagWsCounters7(uint32_t& spaces, uint32_t& runs, uint32_t& hit, uint32_t& miss, uint32_t& resolve,
+                       uint32_t& preserve, uint32_t& semantic) const {
+    spaces = diagWsSpaces; runs = diagWsRuns; hit = diagWsHit; miss = diagWsMiss;
+    resolve = diagWsResolve; preserve = diagWsPreserve; semantic = diagWsSemantic;
+  }
+  // Addendum clause 43: inject the expat chunk size so host tests can force a
+  // multi-byte codepoint to straddle XML_ParseBuffer() calls. 0 = use the default.
+  void setParseChunkSize(size_t n) { parseChunkSize = n ? n : 1024; }
   void setTextSpacing(const int8_t character, const uint8_t wordPercent) {
     characterSpacing = character;
     wordSpacingPercent = wordPercent;
