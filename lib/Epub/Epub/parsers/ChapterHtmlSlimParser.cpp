@@ -784,6 +784,9 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle, cons
   lastVisibleCp = 0;
   pendingSpaceLeftCp = 0;
   hasPendingSpace = false;
+  // Addendum clause 53: a new paragraph starts in the "no visible codepoint yet"
+  // state so a leading U+3000 can suppress the CSS/reader text-indent.
+  atParagraphStart = true;
   if (currentTextBlock) {
     // already have a text block running and it is empty - just reuse it
     if (currentTextBlock->isEmpty()) {
@@ -2429,7 +2432,15 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       // Addendum clause 47 (7): U+3000 ideographic space is a semantic space kept
       // as content (isWhitespace() does not classify it); count it here on its lead
       // byte. U+00A0/U+202F are counted in their dedicated branches below.
-      if (curCp == 0x3000) ++self->diagWsSemantic;
+      if (curCp == 0x3000) {
+        ++self->diagWsSemantic;
+        // Addendum clause 53: a leading ideographic space at paragraph start is kept
+        // as content (never stripped) and itself provides the full-width indent. Suppress
+        // the CSS/reader text-indent so source + CSS do not stack into a doubled indent.
+        if (self->atParagraphStart && self->currentTextBlock) {
+          self->currentTextBlock->suppressFirstLineIndent();
+        }
+      }
     }
     // Codepoints that are NOT truly in the layout text flow: BOM, zero-width
     // chars, and footnote display text. Per clause 39 they must be skipped — no
@@ -2470,6 +2481,16 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       if (wasContinues && !self->nextWordContinues) ++self->diagWsOverride;
       self->pendingSpaceLeftCp = 0;
       self->hasPendingSpace = false;
+    }
+
+    // Addendum clause 53: the paragraph-start window ends at the first genuinely
+    // visible codepoint. Leading ideographic/non-breaking spaces (U+3000, U+00A0,
+    // U+202F) are content that supplies its own indent, so they do NOT end the
+    // window; ASCII whitespace and excluded codepoints (BOM/zero-width/footnote)
+    // never reach here as visible content either.
+    if (self->atParagraphStart && isLeadByte && !isWhitespace(s[i]) && !excludedFromFlow && curCp != 0x3000 &&
+        curCp != 0x00A0 && curCp != 0x202F) {
+      self->atParagraphStart = false;
     }
 
     if (self->effectivePreserveWhitespace && isWhitespace(s[i])) {
@@ -2944,6 +2965,7 @@ bool ChapterHtmlSlimParser::beginParse() {
   lastVisibleCp = 0;
   pendingSpaceLeftCp = 0;
   hasPendingSpace = false;
+  atParagraphStart = true;  // addendum clause 53
   // Initialize block style stack with a root entry representing "no ancestor block elements".
   // The user's paragraph alignment is set as the default so child elements without explicit
   // text-align inherit it correctly through getCombinedBlockStyle.

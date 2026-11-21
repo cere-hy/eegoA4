@@ -54,6 +54,12 @@ class ChapterHtmlSlimParser {
   // Addendum clause 38: the "is a run open" flag is a BOOLEAN, never inferred from
   // pendingSpaceLeftCp's value (0 is a legitimate left neighbour at line start).
   bool hasPendingSpace = false;
+  // Addendum clause 53: true from a paragraph boundary (startNewTextBlock) until
+  // the first visible codepoint of that paragraph is emitted. A leading U+3000
+  // seen while this is true supplies its own full-width indent as content, so the
+  // CSS/reader text-indent is suppressed to avoid a doubled (source+CSS) indent.
+  // Cleared once any real visible codepoint arrives; reset on beginParse.
+  bool atParagraphStart = true;
   // Addendum clause 43: expat feed chunk size (host tests shrink to 1..3 bytes to
   // force UTF-8 codepoints to straddle XML_ParseBuffer calls). Default = 1024.
   size_t parseChunkSize = 1024;

@@ -47,6 +47,9 @@ struct RunResult {
   // matrix; the vector-of-texts is used by the punctuation/preserve cases).
   std::vector<std::string> tokens;
   std::vector<uint32_t> tokenOffsets;
+  // Addendum clause 53: x-position of each word on the FIRST emitted line, used to
+  // assert a leading U+3000 suppresses (rather than stacks with) the text-indent.
+  std::vector<int16_t> firstLineXpos;
 };
 
 fs::path fixturesDir() {
@@ -62,7 +65,7 @@ fs::path writeTempXhtml(const std::string& tag, const std::string& content) {
 }
 
 RunResult runXhtml(const fs::path& xhtml, bool stylesOn, const std::string& tag, bool focusReading = false,
-                   size_t chunkSize = 0) {
+                   size_t chunkSize = 0, uint8_t indentSpaces = 2) {
   // Copy fixture to a temp file so the Storage stub opens a plain path (mirrors the
   // standalone diagnostic; avoids any resolvePath() mapping on repo paths).
   const fs::path tempXhtml = fs::temp_directory_path() / ("pf8dr_" + tag + ".xhtml");
@@ -90,6 +93,9 @@ RunResult runXhtml(const fs::path& xhtml, bool stylesOn, const std::string& tag,
       if (el->getTag() != TAG_PageLine) continue;
       const auto& line = static_cast<const PageLine&>(*el);
       const auto& block = *line.getBlock();
+      if (r.firstLineXpos.empty()) {
+        for (size_t i = 0; i < block.wordCount(); ++i) r.firstLineXpos.push_back(block.wordXpos(static_cast<uint16_t>(i)));
+      }
       r.wordsPerLine.push_back(block.wordCount());
       for (size_t i = 0; i < block.wordCount(); ++i) {
         r.tokens.emplace_back(block.wordText(static_cast<uint16_t>(i)), block.wordTextLen(static_cast<uint16_t>(i)));
@@ -117,6 +123,7 @@ RunResult runXhtml(const fs::path& xhtml, bool stylesOn, const std::string& tag,
                                nullptr,
                                stylesOn ? &cssParser : nullptr};
   if (chunkSize) parser.setParseChunkSize(chunkSize);  // addendum clause 43
+  parser.setParagraphIndentSpaces(indentSpaces);       // addendum clause 53
 
   EXPECT_TRUE(parser.parseAndBuildPages());
   parser.diagWsCounters(r.hit, r.miss, r.resolve, r.overrideC);
@@ -594,6 +601,61 @@ TEST(EmojiBoundary, HanEmojiStripsNearestNeighbour) {
   report("emoji/1", r);
   ASSERT_FALSE(r.tokens.empty());
   EXPECT_EQ(r.miss, 0u);
+}
+
+// ---- PRIORITY: clause 53 — leading U+3000 suppresses text-indent -------------
+// Two host cases required by addendum 53:
+//   (1) leading 2xU+3000 + NO indent setting   -> 2-full-width indent (source supplies it)
+//   (2) leading 2xU+3000 + indent setting      -> still 2, NOT 4 (no stacking)
+// Both walk the real expat full chain. Control case proves the indent setting is
+// genuinely effective when no U+3000 is present (so suppression is conditional).
+TEST(LeadingIdeographicSpace, SuppressesIndentNoStacking) {
+  const std::string han = "\xE8\xAE\xA4\xE8\xAF\x86\xE8\xA7\x84\xE7\x9F\xA9";  // 认识规矩
+  const std::string u3000 = "\xE3\x80\x80";
+
+  auto firstHanX = [&](const RunResult& r) {
+    for (size_t i = 0; i < r.tokens.size() && i < r.firstLineXpos.size(); ++i) {
+      if (r.tokens[i] != u3000) return r.firstLineXpos[i];
+    }
+    return int16_t(-1);
+  };
+  auto run = [&](bool lead, uint8_t ind, const char* tag) {
+    std::string body = "<p>";
+    if (lead) body += u3000 + u3000;
+    body += han + " 承 认 错 误 读 书 写 字 做 人</p>";
+    const auto p = writeTempXhtml(tag, "<html><body>" + body + "</body></html>");
+    return runXhtml(p, false, tag, false, 1, ind);
+  };
+
+  // (1) source supplies the indent: U+3000 kept as content, never stripped.
+  const auto noIndent = run(true, 0, "u3000_noindent");
+  report("u3000/noindent", noIndent);
+  ASSERT_GE(noIndent.tokens.size(), 3u);
+  EXPECT_EQ(noIndent.tokens[0], u3000);
+  EXPECT_EQ(noIndent.tokens[1], u3000);
+  EXPECT_EQ(noIndent.semantic, 2u);
+  const int16_t xNoIndent = firstHanX(noIndent);
+  EXPECT_GT(xNoIndent, 0) << "source U+3000 must supply a visible indent";
+
+  // (2) indent setting present: must NOT stack onto the source-provided indent.
+  const auto withIndent = run(true, 2, "u3000_indent2");
+  report("u3000/indent2", withIndent);
+  ASSERT_GE(withIndent.tokens.size(), 3u);
+  EXPECT_EQ(withIndent.tokens[0], u3000);
+  EXPECT_EQ(withIndent.tokens[1], u3000);
+  const int16_t xWithIndent = firstHanX(withIndent);
+  EXPECT_EQ(xWithIndent, xNoIndent)
+      << "clause 53: reader text-indent suppressed after leading U+3000; no 2+2 stacking";
+
+  // Control: without U+3000 the reader indent setting DOES apply.
+  const auto controlNo = run(false, 0, "noU3000_noindent");
+  const auto controlYes = run(false, 2, "noU3000_indent2");
+  report("control/indent2", controlYes);
+  ASSERT_FALSE(controlYes.tokens.empty());
+  EXPECT_NE(controlYes.tokens[0], u3000);
+  EXPECT_EQ(firstHanX(controlNo), 0);
+  EXPECT_GT(firstHanX(controlYes), firstHanX(controlNo))
+      << "indentSpaces must be effective when no leading U+3000 (suppression is conditional)";
 }
 
 }  // namespace

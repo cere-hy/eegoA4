@@ -23,6 +23,13 @@
 // parser uses. U+00A0 / U+202F (no-break spaces) and U+3000 (ideographic space)
 // never reach shouldStrip(): characterData() has dedicated branches for the first
 // two and isWhitespace() does not classify U+3000, so it flows as content.
+//
+// SINGLE SOURCE OF TRUTH (addendum clause 54): this header is the ONLY CJK
+// codepoint-range definition in the repository. Do NOT duplicate the Han ranges
+// (isCjkIdeograph) anywhere else — firmware, host tests, tools and any port must
+// include this header instead. Upstream pico-plus carried two copies of the set
+// and they drifted apart in the 0x2000 punctuation block, producing divergent
+// line breaking between builds. Any future range change belongs here, once.
 namespace CjkWhitespace {
 
 // Han ideographs. Narrower than "all CJK punctuation" on purpose: punctuation is
