@@ -183,4 +183,7 @@
 - 钉子3（持锁时长）：MSC EP buffer=4096B=8扇区/次；单次 `mscRead` 持 L1 ≈3.3ms、`mscWrite` ≈16.3ms（含 NAND 编程），均 **<50ms → 不降级**；写大文件瞬间可能顶满一帧 UI 偶发卡顿（已知，必要时再加"USB 模式停 usbDriveState 轮询"开关，本批未做）
 - 验证：host 30 套 29 PASS+1 既有 FAIL（ContentProtection `test_zip.cpp` `-Werror=sized-deallocation`，未触碰）；新增 `UsbMassStorage/test/host` 19 checks 全绿；符号级 `HalStorage::usbMscLockFn`/`IoLockGuard::~IoLockGuard`/`mscRead/mscWrite` 入 ELF、日志串入固件
 - 边界不变：APK/协议/B3/0x07-0x08 零触碰；`storageMutex` 递归类型不变；熔断令有效；不开 S4
-- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf7_factory.bin`（待真机验收）
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf7_factory.bin`（**真机验收通过**，2026-11-21）
+- 真机验收 ①–⑨ 全覆盖通过：含 **23MB 字体拷贝成功且不损坏**（大文件写路径 L1 持锁 ≈16.3ms 上界真机确认不崩、数据完好，钉子3 UI 偶发卡顿未构成阻塞、不降级）
+- 追加实证：切换**思源宋体**后排版正常、速度快、UI 与 PUSH 均正常 → FontMap 跨字体兼容成立，**pf6 验收⑫（换未用过的 TTF 验证 map 重建）闭环**，pf6 ⑧–⑭ 全部完成
+- 登记待办（本批不做）：① `ContentProtection/test_zip.cpp` 的 `-Werror=sized-deallocation` 既有 FAIL——下批修掉，不能常驻红灯；② 封面缓存 `coverCacheUsed` 定长分槽方案（P2，见内存审计追问 1.4）——有真机顿挫再做
