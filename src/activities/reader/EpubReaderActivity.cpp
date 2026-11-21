@@ -305,6 +305,9 @@ bool EpubReaderActivity::loadBook() {
     LOG_ERR("ERS", "Failed to load EPUB%s%s", loadProtectionError.empty() ? "" : ": ", loadProtectionError.c_str());
     return false;
   }
+  // S3cPF8c: capture the embedded-CSS failure before loadedEpub is moved into
+  // epub, so renderBook() can show a one-shot, non-blocking notice.
+  pendingCssNotice = loadedEpub->getCssLoadFailure();
   epub = std::move(loadedEpub);
   vocabularyMetadata.reset();
 
@@ -1832,6 +1835,20 @@ void EpubReaderActivity::renderBook() {
     GUI.drawPopup(renderer, tr(STR_SAVE_PROGRESS_FAILED));
   };
 
+  // S3cPF8c: one-shot, non-blocking notice that embedded styles did not load.
+  // Does not gate opening the book — styles on is simply inactive this session.
+  const auto showCssLoadNotice = [this]() {
+    if (pendingCssNotice == CssLoadGuard::Failure::None) return;
+    StrId msg = StrId::STR_CSS_PARSE_FAILED;
+    if (pendingCssNotice == CssLoadGuard::Failure::LowHeap) {
+      msg = StrId::STR_CSS_LOW_MEMORY;
+    } else if (pendingCssNotice == CssLoadGuard::Failure::FileTooLarge) {
+      msg = StrId::STR_CSS_FILE_TOO_LARGE;
+    }
+    pendingCssNotice = CssLoadGuard::Failure::None;
+    GUI.drawPopup(renderer, I18N.get(msg));
+  };
+
   const auto showBuildError = [this](const char* message = nullptr) {
     renderer.clearScreen();
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
@@ -2159,6 +2176,9 @@ void EpubReaderActivity::renderBook() {
   }
 
   showPendingSyncSaveError();
+  // S3cPF8c: show the one-shot embedded-CSS failure notice on the first
+  // rendered page (non-blocking; reading continues with styles inactive).
+  showCssLoadNotice();
 
   if (pendingScreenshot) {
     pendingScreenshot = false;

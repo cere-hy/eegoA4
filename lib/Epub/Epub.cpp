@@ -24,6 +24,7 @@
 #include "Epub/parsers/ContentOpfParser.h"
 #include "Epub/parsers/TocNavParser.h"
 #include "Epub/parsers/TocNcxParser.h"
+#include "Epub/css/CssLoadGuard.h"
 
 Epub::Epub(std::string filepath, const std::string& cacheDir) : filepath(std::move(filepath)) {
   cachePath = cacheDir + "/epub_" + std::to_string(std::hash<std::string>{}(this->filepath));
@@ -269,11 +270,12 @@ void Epub::discoverCssFilesFromZip() {
 }
 
 CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existingCacheStatus) const {
-  // Maximum CSS file size we'll attempt to parse (uncompressed)
-  // Larger files risk memory exhaustion on ESP32
-  constexpr size_t MAX_CSS_FILE_SIZE = 128 * 1024;  // 128KB
-  // Minimum heap required before attempting CSS parsing
-  constexpr size_t MIN_HEAP_FOR_CSS_PARSING = 64 * 1024;  // 64KB
+  // S3cPF8c: gate constants live in CssLoadGuard.h so the boundary is host-testable.
+  //  MAX_CSS_FILE_SIZE = 128KB  — upstream #947 real defence, unchanged this batch.
+  //  MIN_HEAP_FOR_CSS_PARSING   — lowered 64KB→24KB; real-book peak is ~11KB,
+  //                               single allocation 8192B (verified). See CssLoadGuard.h.
+  using CssLoadGuard::MAX_CSS_FILE_SIZE;
+  using CssLoadGuard::MIN_HEAP_FOR_CSS_PARSING;
 
   if (cssFiles.empty()) {
     LOG_DBG("EBP", "No CSS files to parse, but CssParser created for inline styles");
@@ -350,9 +352,11 @@ CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existing
 
     // Check heap before parsing - CSS parsing allocates heavily
     const uint32_t freeHeap = ESP.getFreeHeap();
-    if (freeHeap < MIN_HEAP_FOR_CSS_PARSING) {
+    if (CssLoadGuard::isHeapInsufficient(freeHeap)) {
       LOG_ERR("EBP", "Insufficient heap for CSS parsing (%u bytes free, need %zu), skipping: %s", freeHeap,
               MIN_HEAP_FOR_CSS_PARSING, cssPath.c_str());
+      // S3cPF8c: make the failure visible instead of silently falling back.
+      cssLoadFailure = CssLoadGuard::mergeFailure(cssLoadFailure, CssLoadGuard::Failure::LowHeap);
       if (parseResult == CssParser::ParseResult::Complete) {
         parseResult = CssParser::ParseResult::Partial;
       }
@@ -362,9 +366,10 @@ CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existing
     // Check CSS file size before decompressing - skip files that are too large
     size_t cssFileSize = 0;
     if (getItemSize(cssPath, &cssFileSize)) {
-      if (cssFileSize > MAX_CSS_FILE_SIZE) {
+      if (CssLoadGuard::isFileTooLarge(cssFileSize)) {
         LOG_ERR("EBP", "CSS file too large (%zu bytes > %zu max), skipping: %s", cssFileSize, MAX_CSS_FILE_SIZE,
                 cssPath.c_str());
+        cssLoadFailure = CssLoadGuard::mergeFailure(cssLoadFailure, CssLoadGuard::Failure::FileTooLarge);
         if (parseResult == CssParser::ParseResult::Complete) {
           parseResult = CssParser::ParseResult::Partial;
         }
@@ -377,6 +382,7 @@ CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existing
     HalFile tempCssFile;
     if (!Storage.openFileForWrite("EBP", tmpCssPath, tempCssFile)) {
       LOG_ERR("EBP", "Could not create temp CSS file");
+      cssLoadFailure = CssLoadGuard::mergeFailure(cssLoadFailure, CssLoadGuard::Failure::ParseError);
       parseResult = CssParser::ParseResult::Error;
       continue;
     }
@@ -385,6 +391,7 @@ CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existing
       // Explicitly close() file before calling Storage.remove()
       tempCssFile.close();
       Storage.remove(tmpCssPath.c_str());
+      cssLoadFailure = CssLoadGuard::mergeFailure(cssLoadFailure, CssLoadGuard::Failure::ParseError);
       parseResult = CssParser::ParseResult::Error;
       continue;
     }
@@ -395,6 +402,7 @@ CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existing
     if (!Storage.openFileForRead("EBP", tmpCssPath, tempCssFile)) {
       LOG_ERR("EBP", "Could not open temp CSS file for reading");
       Storage.remove(tmpCssPath.c_str());
+      cssLoadFailure = CssLoadGuard::mergeFailure(cssLoadFailure, CssLoadGuard::Failure::ParseError);
       parseResult = CssParser::ParseResult::Error;
       continue;
     }
@@ -403,6 +411,7 @@ CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existing
     tempCssFile.close();
     Storage.remove(tmpCssPath.c_str());
     if (streamResult == CssParser::ParseResult::Error) {
+      cssLoadFailure = CssLoadGuard::mergeFailure(cssLoadFailure, CssLoadGuard::Failure::ParseError);
       parseResult = CssParser::ParseResult::Error;
     } else if (streamResult == CssParser::ParseResult::Partial && parseResult == CssParser::ParseResult::Complete) {
       parseResult = CssParser::ParseResult::Partial;
@@ -462,6 +471,10 @@ bool Epub::openProtection() {
 
 bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
   LOG_DBG("EBP", "Loading ePub: %s", filepath.c_str());
+
+  // S3cPF8c: reset the CSS failure state on every load so a stale notice from
+  // a previous open is never shown.
+  cssLoadFailure = CssLoadGuard::Failure::None;
 
   if (!openProtection()) return false;
 

@@ -253,6 +253,9 @@ class EpubReaderActivity final : public ReaderActivity {
   // Protection error captured by loadBook() for handleLoadFailure(); the
   // failed Epub itself does not outlive loadBook().
   std::string loadProtectionError;
+  // S3cPF8c: embedded-CSS load failure captured by loadBook() and shown once
+  // as a non-blocking popup in renderBook(). None = no notice.
+  CssLoadGuard::Failure pendingCssNotice = CssLoadGuard::Failure::None;
 
   bool loadBook() override;
   bool handleLoadFailure() override;

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Epub/BookMetadataCache.h"
+#include "Epub/css/CssLoadGuard.h"
 #include "Epub/css/CssParser.h"
 
 class ZipFile;
@@ -45,6 +46,10 @@ class Epub {
   std::unique_ptr<freeink::content::ContentDecryptor> decryptor;
   // User-presentable reason the encrypted-entry accessor could not be opened.
   std::string protectionError;
+  // S3cPF8c: why embedded CSS did not load (silent before). Written by the
+  // const parseCssFiles(), so mutable. Read by the reader after load() to show
+  // a non-blocking notice. None = no CSS / cache hit / full success.
+  mutable CssLoadGuard::Failure cssLoadFailure = CssLoadGuard::Failure::None;
 
   bool findContentOpfFile(std::string* contentOpfFile, ZipFile* sharedZip = nullptr) const;
   bool parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, bool writeSpineEntries = true,
@@ -69,6 +74,8 @@ class Epub {
   const std::string& getPath() const;
   // Empty unless the encrypted-entry accessor failed to open.
   const std::string& getProtectionError() const { return protectionError; }
+  // S3cPF8c: embedded CSS load failure, for a non-blocking reader notice.
+  CssLoadGuard::Failure getCssLoadFailure() const { return cssLoadFailure; }
   const std::string& getTitle() const;
   const std::string& getAuthor() const;
   const std::string& getLanguage() const;

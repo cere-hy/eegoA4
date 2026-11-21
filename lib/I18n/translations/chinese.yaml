@@ -652,3 +652,7 @@ STR_SIDE_BUTTONS: "侧边按键"
 STR_TAPS_AND_GESTURES: "轻点与手势"
 STR_PAGE_TURN_LONG_PRESS: "翻页长按"
 STR_POWER_DOUBLE_CLICK: "双击"
+
+STR_CSS_LOW_MEMORY: "内嵌样式未加载（内存不足）"
+STR_CSS_FILE_TOO_LARGE: "内嵌样式未加载（文件过大）"
+STR_CSS_PARSE_FAILED: "内嵌样式未加载（解析失败）"
