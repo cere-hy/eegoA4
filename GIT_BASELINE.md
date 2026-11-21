@@ -187,3 +187,16 @@
 - 真机验收 ①–⑨ 全覆盖通过：含 **23MB 字体拷贝成功且不损坏**（大文件写路径 L1 持锁 ≈16.3ms 上界真机确认不崩、数据完好，钉子3 UI 偶发卡顿未构成阻塞、不降级）
 - 追加实证：切换**思源宋体**后排版正常、速度快、UI 与 PUSH 均正常 → FontMap 跨字体兼容成立，**pf6 验收⑫（换未用过的 TTF 验证 map 重建）闭环**，pf6 ⑧–⑭ 全部完成
 - 登记待办（本批不做）：① `ContentProtection/test_zip.cpp` 的 `-Werror=sized-deallocation` 既有 FAIL——下批修掉，不能常驻红灯；② 封面缓存 `coverCacheUsed` 定长分槽方案（P2，见内存审计追问 1.4）——有真机顿挫再做
+
+## S3cPF8 — CJK 排版正确性 + test_zip 修复 + host 测试规范（b65-s3c-pf8）
+- 范围：① 取消内嵌样式后 CJK 排版错乱（P1 主体）② test_zip.cpp 既有 FAIL 修复（顺带，仅测试文件）③ 新增 host 测试规范"非默认值走主流程"（流程，不改代码）
+- 根因：关内嵌样式→CSS text-align 失效→全段用全局 JUSTIFIED（默认 0）→CJK 逐字海量零宽 gap→`computeJustifyExtra` 无单缝上限→稀疏行/短对话单缝超半字宽。styles on 时 CSS 盒模型约束该路径，故默认路径正常、非默认暴露
+- 修复：`computeJustifyExtra(spare,gaps,maxGap)` 单缝超 `maxGap` 整行回退左对齐（不部分 clamp）；`maxGap=getFontAscenderSize(fontId)/2`（纯查表、无 advance 预热/cold I/O），普通+RTL 两调用点均传；CJK 逐字断行/标点禁则不变（与开关无关）；`isLastLine` 已覆盖末行+`<br>` 前硬换行行（加注释固化）；`SECTION_FILE_VERSION` 75→76（partial 哨兵派生联动）使旧缓存失效重建
+- 测试修复（仅测试文件）：`test_zip.cpp` 补 sized `operator delete[](void*,size_t)`；`test_manifest_reserve.cpp` 修 `#define malloc` 污染 std::malloc（宏前仅预 include 标准头、保留 Util.h 在宏下编译以维持 heapProbe 注入、malloc 注入函数提到全局），ESP32C3/ESP32S3 双目标通过
+- host 测试规范（交付物）：`/workspace/S3cPF8_host测试规范_非默认值主流程.md`——每个开关默认值+每个非默认值各走主流程、断言行为差异非仅"没崩"；三处同根 bug（排版/USB/PUSH 字体）为案例；新增 3 条 host 断言（Sparse 回退/Last line/CJK breaks 非默认路径）
+- host 全量：**30/30 套首次全绿**（双红灯消除）；gtest chapter 133/133（含 PF8 新增 3 条）；固件单编 SUCCESS（169.84s，-j4）
+- 功能提交主仓 `f13cab30`（ParsedText.cpp/Section.cpp/测试断言+子模块指针），子模块 `6dce7b8`（2 测试文件）；A 级双冷编：双删、783 编译单元、epoch=1794813449、两次真实退出码 0，四产物逐字节 MATCH
+- app sha256 `27322e49dec9e1b94f04d7a942c0ad9cc5a05fa05a07cd13f0e84744a9967f81`（6,030,784 B）
+- factory sha256 `bcec37f4ab262c6d194c52547cf6e08dab781a6c721f5d7e38191ed332f1fc1e`（6,096,320 B）
+- 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf8_factory.bin`（待真机验收）
+- 边界不变：APK/协议/B3/0x07-0x08 零触碰；熔断令有效；不开 S4
