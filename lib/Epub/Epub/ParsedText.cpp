@@ -143,14 +143,19 @@ std::vector<size_t> explicitHyphenBreakByteOffsets(const std::string& text, cons
   return breakOffsets;
 }
 
-int computeJustifyExtra(const int spareSpace, const size_t gapCount) {
+// S3cPF8: CJK paragraph correctness when embedded styles are off. The global
+// default alignment is JUSTIFIED; with embedded CSS disabled every paragraph
+// uses it, and CJK per-character breaking yields dozens of zero-width gaps per
+// line. Spreading spare space evenly could blow a single gap past half an em,
+// producing the "字间大缝 / 对话短行被拉伸" artifact. When the per-gap stretch
+// exceeds maxGap the whole line falls back to flush-left (justifyExtra = 0),
+// rather than clamping a subset of gaps (which would shift the line off margin).
+// maxGap <= 0 disables the cap (legacy behavior for callers without a font metric).
+int computeJustifyExtra(const int spareSpace, const size_t gapCount, const int maxGap = 0) {
   if (gapCount < MIN_JUSTIFY_GAPS || spareSpace <= 0) return 0;
-  // Distribute the spare space evenly across gaps. Do NOT bail out to 0 when the
-  // per-gap stretch is large: a sparse line (few words on a wide page) legitimately
-  // needs big gaps to reach the margin. Returning 0 there disables justification for
-  // that line, leaving it right-aligned (RTL) / left-aligned (LTR) — the mismatched
-  // alignment bug. Match the un-capped behavior of the old code.
-  return spareSpace / static_cast<int>(gapCount);
+  const int perGap = spareSpace / static_cast<int>(gapCount);
+  if (maxGap > 0 && perGap > maxGap) return 0;
+  return perGap;
 }
 
 // Removes every soft hyphen in-place so rendered glyphs match measured widths.
@@ -1553,8 +1558,16 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
   // For justified text, compute per-gap extra to distribute remaining space evenly.
   // extraEndOffset reserves space for any ruby group at the right edge of the line.
   const int spareSpace = effectivePageWidth - extraStartOffset - extraEndOffset - lineWordWidthSum - totalNaturalGaps;
+  // S3cPF8: cap a single justified gap at half an em (a CJK glyph is ~1em wide).
+  // Use the font ascender size: a pure metric lookup with NO glyph advance
+  // measurement, so it cannot cold-load an SD font / disturb advance prewarming.
+  // Non-positive result leaves legacy uncapped behavior. isLastLine already
+  // excludes the paragraph末行 AND the line before a hard break (<br> flushes
+  // its block via makePages(true)), so no separate hard-break check is needed.
+  const int emPixels = renderer.getFontAscenderSize(fontId);
+  const int maxJustifyGap = emPixels > 0 ? emPixels / 2 : 0;
   const int justifyExtra = (effectiveAlignment == CssTextAlign::Justify && !isLastLine)
-                               ? computeJustifyExtra(spareSpace, actualGapCount)
+                               ? computeJustifyExtra(spareSpace, actualGapCount, maxJustifyGap)
                                : 0;
 
   // BiDi processing: reorder words with UAX#9 in full-line context.
@@ -1640,7 +1653,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
     const int reorderedSpare =
         effectivePageWidth - extraStartOffset - extraEndOffset - reorderedWordWidthSum - reorderedNaturalGaps;
     const int reorderedJustifyExtra = (effectiveAlignment == CssTextAlign::Justify && !isLastLine)
-                                          ? computeJustifyExtra(reorderedSpare, reorderedGapCount)
+                                          ? computeJustifyExtra(reorderedSpare, reorderedGapCount, maxJustifyGap)
                                           : 0;
 
     const int justifyContribution = (effectiveAlignment == CssTextAlign::Justify && !isLastLine)

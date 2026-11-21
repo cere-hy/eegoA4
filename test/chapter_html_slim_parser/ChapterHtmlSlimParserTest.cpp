@@ -24,6 +24,7 @@
 #include "Epub/parsers/ChapterHtmlSlimParser.h"
 #undef private
 #undef class
+#include "Epub/CjkBreaks.h"
 #include "../../src/fontIds.h"
 
 namespace {
@@ -2325,4 +2326,58 @@ TEST(TextDecorationPosition, UnderlineStaysBelowBaseline) {
     line->render(renderer, 0, 0, 20);
     EXPECT_EQ(renderer.lastLineY, 34);
   });
+}
+
+// ---- S3cPF8: CJK justification correctness + non-default setting coverage ----
+// These tests encode the "非默认值走一遍主流程" host-test rule: the default
+// path (styles on / per-book alignment) was covered, but the non-default path
+// (embedded styles OFF -> global JUSTIFIED applied to CJK per-char lines) never
+// was, which produced the 字间大缝 bug. The stub renderer advances every glyph
+// 8 px, so a single CJK glyph is 8 px and the justify cap is 8/2 = 4 px.
+
+TEST(JustifyCap, SparseCjkLineFallsBackWhenGapExceedsHalfGlyph) {
+  GfxRenderer renderer;
+  BlockStyle style;
+  style.alignment = CssTextAlign::Justify;  // non-default: global JUSTIFY (styles off)
+  ParsedText text(false, false, style, 0);
+  // Two CJK chars on a very wide line: spare space >> cap, must NOT stretch.
+  for (const char* w : {"\xE4\xB8\xAD" /*中*/, "\xE6\x96\x87" /*文*/}) {
+    text.addWord(w, EpdFontFamily::REGULAR);
+  }
+  unsigned lines = 0;
+  text.layoutAndExtractLines(renderer, 0, 200, [&](std::unique_ptr<TextBlock> line, uint32_t) {
+    if (lines++ != 0) return;
+    // Natural layout of two 8px glyphs + one 4px space gap puts glyph 2 at x=12.
+    // Without the cap spare=~180 would push x far beyond 12; with the cap the
+    // line falls back to flush-left, so x must stay exactly at the natural 12.
+    EXPECT_EQ(line->wordXpos(0), 0);
+    EXPECT_EQ(line->wordXpos(1), 12);
+  });
+  EXPECT_EQ(lines, 1u);
+}
+
+TEST(JustifyCap, LastLineIsNeverStretched) {
+  GfxRenderer renderer;
+  BlockStyle style;
+  style.alignment = CssTextAlign::Justify;
+  ParsedText text(false, false, style, 0);
+  for (const char* w : {"\xE4\xB8\xAD", "\xE6\x96\x87"}) {
+    text.addWord(w, EpdFontFamily::REGULAR);
+  }
+  // Last line (lineBreak == words.size()) must stay flush-left regardless of spare.
+  text.layoutAndExtractLines(renderer, 0, 60, [&](std::unique_ptr<TextBlock> line, uint32_t) {
+    EXPECT_EQ(line->wordXpos(0), 0);
+    EXPECT_EQ(line->wordXpos(1), 12);
+  });
+}
+
+TEST(CjkBreaksNonDefault, StylesOffKeepsPerCharBreakAndPunctuationRules) {
+  // Non-default path: with embedded styles disabled every paragraph uses the
+  // global style; CJK per-character breaking and punctuation prohibitions must
+  // remain intact (they are shared and must not regress).
+  EXPECT_TRUE(CjkBreaks::hasBreakOpportunityBetween(U'中', U'文'));
+  // Closing punctuation must not start a line (no break before it).
+  EXPECT_FALSE(CjkBreaks::hasBreakOpportunityBetween(U'中', U'。'));
+  // Opening punctuation must not end a line (no break after it).
+  EXPECT_FALSE(CjkBreaks::hasBreakOpportunityBetween(U'（', U'中'));
 }
