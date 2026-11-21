@@ -85,11 +85,7 @@ namespace {
 // v75: Headings are not hyphenated.
 // v76: S3cPF8 — justified CJK gaps capped at half a glyph; old cached pages
 //      (built with uncapped justification) must be invalidated and rebuilt.
-// v77: S3cPF8b — CJK adjacent-whitespace stripped at content-tree build; page
-//      counts change (e.g. 15 -> 8), so old cached pages/section LUTs must be
-//      rebuilt. progress.bin is NOT invalidated: the reader re-maps its stored
-//      visibleTextOffset onto the fresh LUT (see applyDeferredReposition).
-constexpr uint8_t SECTION_FILE_VERSION = 77;
+constexpr uint8_t SECTION_FILE_VERSION = 76;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

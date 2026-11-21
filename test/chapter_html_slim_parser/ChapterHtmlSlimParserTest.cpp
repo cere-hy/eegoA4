@@ -25,7 +25,6 @@
 #undef private
 #undef class
 #include "Epub/CjkBreaks.h"
-#include "Epub/CjkWhitespace.h"
 #include "../../src/fontIds.h"
 
 namespace {
@@ -2139,14 +2138,10 @@ TEST(TextSpacingLayout, CachedPageRestoresSpacing) {
 }
 
 TEST_F(ChapterHtmlSlimParserTest, ParserAppliesTextSpacingToParagraphs) {
-  // S3cPF8b: wordSpacing is now exercised with a LATIN word gap. A CJK|CJK space
-  // ("一二三 四五") is intentionally stripped by the new cleaning layer, so it is
-  // no longer a valid carrier for the word-spacing assertion. The 150% word space
-  // (4 px * 1.5 = 6 px) must survive between "ab" and "cd".
   parser.setTextSpacing(-1, 150);
   parser.beginParse();
   ChapterHtmlSlimParser::startElement(&parser, "p", nullptr);
-  const std::string text = "ab cd";
+  const std::string text = "\xe4\xb8\x80\xe4\xba\x8c\xe4\xb8\x89 \xe5\x9b\x9b\xe4\xba\x94";  // 一二三 四五
   ChapterHtmlSlimParser::characterData(&parser, text.c_str(), static_cast<int>(text.size()));
   ChapterHtmlSlimParser::endElement(&parser, "p");
   parser.makePages();
@@ -2156,11 +2151,10 @@ TEST_F(ChapterHtmlSlimParserTest, ParserAppliesTextSpacingToParagraphs) {
     if (element->getTag() != TAG_PageLine) continue;
     const auto& block = *static_cast<const PageLine&>(*element).getBlock();
     ++lines;
-    ASSERT_EQ(block.wordCount(), 2);
+    ASSERT_EQ(block.wordCount(), 5);
     EXPECT_EQ(block.getBlockStyle().characterSpacing, -1);
-    // "ab" advance = 8 + (8-1 tracking) = 15 px; word gap = scaleSpace(4,150%) = 6 px.
-    // The 6 px Latin word gap proves wordSpacing survives the new CJK cleaning layer.
-    EXPECT_EQ(block.wordXpos(1) - block.wordXpos(0), 15 + 6);
+    EXPECT_EQ(block.wordXpos(1) - block.wordXpos(0), 7);   // 8 px glyph, -1 px tracking
+    EXPECT_EQ(block.wordXpos(3) - block.wordXpos(2), 14);  // glyph plus 150% of a 4 px space
   }
   EXPECT_EQ(lines, 1u);
 }
@@ -2386,168 +2380,4 @@ TEST(CjkBreaksNonDefault, StylesOffKeepsPerCharBreakAndPunctuationRules) {
   EXPECT_FALSE(CjkBreaks::hasBreakOpportunityBetween(U'中', U'。'));
   // Opening punctuation must not end a line (no break after it).
   EXPECT_FALSE(CjkBreaks::hasBreakOpportunityBetween(U'（', U'中'));
-}
-
-// ---- S3cPF8b: CJK adjacent-whitespace cleaning + justify lower bound ----
-// Two source shapes (span-boundary spaces vs. bare-text inter-character spaces)
-// times two style switches (embeddedStyle on/off) must all produce the SAME token
-// stream: no space word between adjacent CJK characters. Before this fix the span
-// shape was cleaned only as a side effect of styled spans, and the bare-text shape
-// (and both shapes with styles off) leaked a word boundary + visible gap.
-namespace {
-
-// Feed a body fragment through the raw XML callbacks and return a token sketch:
-// each word as "text/c" where /c marks continues=true. Spaces that survive as
-// their own word show up literally as " /-".
-std::string cjkTokenSketchImpl(ChapterHtmlSlimParser& parser, const bool stylesOn,
-                               const std::function<void(ChapterHtmlSlimParser&)>& feed) {
-  parser.embeddedStyle = stylesOn;
-  parser.cssParser = nullptr;  // no stylesheet -> cleaning cannot be masked by span styling
-  parser.currentTextBlock = std::make_unique<ParsedText>();
-  ChapterHtmlSlimParser::startElement(&parser, "body", nullptr);
-  feed(parser);
-  ChapterHtmlSlimParser::endElement(&parser, "body");
-  auto* block = parser.currentTextBlock.get();
-  std::string out;
-  for (size_t i = 0; i < block->size(); ++i) {
-    out += block->wordAt(i);
-    out += block->wordContinues[i] ? "/c" : "/-";
-  }
-  return out;
-}
-
-std::string cjkTokenSketch(ChapterHtmlSlimParser& parser, const std::string& body, const bool stylesOn) {
-  return cjkTokenSketchImpl(parser, stylesOn, [&](ChapterHtmlSlimParser& p) {
-    ChapterHtmlSlimParser::characterData(&p, body.c_str(), static_cast<int>(body.size()));
-  });
-}
-
-}  // namespace
-
-TEST(CjkWhitespaceCleaning, TwoSourcesTimesTwoStyleSwitchesProduceSameTokens) {
-  GfxRenderer renderer;
-  CssParser cssParser{"/tmp"};
-  std::string filepath = "unused.xhtml";
-  ChapterHtmlSlimParser parser{nullptr, filepath, renderer, 0, 1.0f, false, 0,
-                               static_cast<uint16_t>(renderer.getScreenWidth()),
-                               static_cast<uint16_t>(renderer.getScreenHeight()), false, false, {},
-                               true, "", "", 0, {}, nullptr, &cssParser};
-
-  // Shape A: spaces at an inline <span> boundary. Fed as text with the spaces
-  // inline; the cleaning rule sees the same left/right codepoints regardless of
-  // whether a real <span> tag surrounds them.
-  const std::string spanSource = "\xE4\xBD\xA0\xE9\xAA\x86 "  // 骆驼 + space
-                                 "\xE7\xA5\xA5\xE5\xAD\x90";  // 祥子
-  // Shape B: spaces between every bare CJK character.
-  const std::string bareSource = "\xE4\xBD\xA0 \xE9\xAA\x86 \xE7\xA5\xA5 \xE5\xAD\x90";  // 骆 驼 祥 子
-
-  const std::string onSpan = cjkTokenSketch(parser, spanSource, true);
-  const std::string offSpan = cjkTokenSketch(parser, spanSource, false);
-  const std::string onBare = cjkTokenSketch(parser, bareSource, true);
-  const std::string offBare = cjkTokenSketch(parser, bareSource, false);
-
-  // Baseline: the same four CJK chars with NO spaces at all (single callback).
-  const std::string baseline = cjkTokenSketch(parser, "\xE4\xBD\xA0\xE9\xAA\x86\xE7\xA5\xA5\xE5\xAD\x90", false);
-
-  EXPECT_EQ(onSpan, offSpan);
-  EXPECT_EQ(onBare, offBare);
-  EXPECT_EQ(onSpan, onBare);
-  EXPECT_EQ(offSpan, offBare);
-  // All four combos must equal the no-space baseline: cleaning removes every
-  // CJK-adjacent space word, not merely "looks the same".
-  EXPECT_EQ(onBare, baseline);
-  EXPECT_EQ(offBare, baseline);
-  // No standalone space word may survive between adjacent CJK chars.
-  EXPECT_EQ(onBare.find(" /-"), std::string::npos);
-}
-
-TEST(CjkWhitespaceCleaning, SpanBoundarySpaceAcrossCallbacksIsStripped) {
-  GfxRenderer renderer;
-  CssParser cssParser{"/tmp"};
-  std::string filepath = "unused.xhtml";
-  ChapterHtmlSlimParser parser{nullptr, filepath, renderer, 0, 1.0f, false, 0,
-                               static_cast<uint16_t>(renderer.getScreenWidth()),
-                               static_cast<uint16_t>(renderer.getScreenHeight()), false, false, {},
-                               true, "", "", 0, {}, nullptr, &cssParser};
-
-  const char* luo = "\xE4\xBD\xA0";    // 骆
-  const char* tuo = "\xE9\xAA\x86";    // 驼
-  const char* xiang = "\xE7\xA5\xA5";  // 祥
-  // Simulate a <span> boundary: "骆驼" in one callback, a lone space in the next,
-  // "祥" in a third. The left codepoint must survive the callback split (this is
-  // what pendingSpaceLeftCp is for) so the CJK|CJK space is still stripped.
-  const std::string across = cjkTokenSketchImpl(parser, false, [&](ChapterHtmlSlimParser& p) {
-    ChapterHtmlSlimParser::characterData(&p, luo, 3);
-    ChapterHtmlSlimParser::characterData(&p, tuo, 3);
-    ChapterHtmlSlimParser::characterData(&p, " ", 1);
-    ChapterHtmlSlimParser::characterData(&p, xiang, 3);
-  });
-  const std::string baseline = cjkTokenSketch(parser, "\xE4\xBD\xA0\xE9\xAA\x86\xE7\xA5\xA5", false);
-  EXPECT_EQ(across, baseline);
-  EXPECT_EQ(across.find(" /-"), std::string::npos);
-}
-
-TEST(CjkWhitespaceCleaning, CjkCodepointTableCoversLoneMarksAndRanges) {
-  using namespace CjkWhitespace;
-  // CJK|CJK -> strip; lone marks 々 ー 〇 included
-  EXPECT_TRUE(shouldStripBetween(U'骆', U'驼'));
-  EXPECT_TRUE(shouldStripBetween(U'祥', U'。'));        // CJK punctuation旁
-  EXPECT_TRUE(shouldStripBetween(U'々', U'子'));        // 々 U+3005
-  EXPECT_TRUE(shouldStripBetween(U'ー', U'子'));        // ー U+30FC
-  EXPECT_TRUE(shouldStripBetween(U'〇', U'一'));        // 〇 U+3007
-  EXPECT_TRUE(shouldStripBetween(U'汉', 0x20000));      // Ext B
-  // CJK|Latin/digit -> keep a single space
-  EXPECT_FALSE(shouldStripBetween(U'调', U'l'));
-  EXPECT_FALSE(shouldStripBetween('7', U'字'));
-  EXPECT_FALSE(shouldStripBetween(U'字', '7'));
-  EXPECT_FALSE(shouldStripBetween(U'字', U'A'));
-  // missing neighbour (0) -> keep
-  EXPECT_FALSE(shouldStripBetween(0, U'字'));
-  EXPECT_FALSE(shouldStripBetween(U'字', 0));
-  // ASCII punctuation is not CJK
-  EXPECT_FALSE(shouldStripBetween(U'字', ','));
-}
-
-TEST(CjkWhitespaceCleaning, EnglishWordSpacingIsPreserved) {
-  GfxRenderer renderer;
-  CssParser cssParser{"/tmp"};
-  std::string filepath = "unused.xhtml";
-  ChapterHtmlSlimParser parser{nullptr, filepath, renderer, 0, 1.0f, false, 0,
-                               static_cast<uint16_t>(renderer.getScreenWidth()),
-                               static_cast<uint16_t>(renderer.getScreenHeight()), false, false, {},
-                               true, "", "", 0, {}, nullptr, &cssParser};
-  parser.embeddedStyle = false;
-  parser.cssParser = nullptr;
-  parser.currentTextBlock = std::make_unique<ParsedText>();
-  ChapterHtmlSlimParser::startElement(&parser, "body", nullptr);
-  const char* words[] = {"The", " quick", " brown", " fox", " jumps"};
-  for (const char* w : words) ChapterHtmlSlimParser::characterData(&parser, w, std::strlen(w));
-  ChapterHtmlSlimParser::endElement(&parser, "body");
-  auto* block = parser.currentTextBlock.get();
-  // Each Latin word is its own token and the separating space is a real gap
-  // (continues=false), so word count must stay 5 and no token contains a space.
-  EXPECT_EQ(block->size(), 5u);
-  for (size_t i = 0; i < block->size(); ++i) {
-    EXPECT_EQ(block->wordAt(i).find(' '), std::string_view::npos);
-  }
-}
-
-TEST(JustifyLowerBound, OverWideLineFallsBackToLeftWithNoOverprint) {
-  GfxRenderer renderer;
-  BlockStyle style;
-  style.alignment = CssTextAlign::Justify;  // styles off -> global JUSTIFY
-  ParsedText text(false, false, style, 0);
-  // A deliberately long line of CJK chars that cannot fit 40 px; natural glyph
-  // advance is 8 px (stub renderer). Justify must not push any glyph backwards.
-  for (int i = 0; i < 20; ++i) text.addWord("\xE4\xB8\xAD" /*中*/, EpdFontFamily::REGULAR);
-  uint16_t lines = 0;
-  text.layoutAndExtractLines(renderer, 0, 40, [&](std::unique_ptr<TextBlock> line, uint32_t) {
-    ++lines;
-    int16_t prevX = line->wordXpos(0);
-    for (uint16_t i = 1; i < line->wordCount(); ++i) {
-      EXPECT_GE(line->wordXpos(i), prevX) << "glyph " << i << " pulled back -> overprint";
-      prevX = line->wordXpos(i);
-    }
-  });
-  EXPECT_GE(lines, 1u);
 }

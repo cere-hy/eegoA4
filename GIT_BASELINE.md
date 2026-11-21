@@ -201,7 +201,9 @@
 - 交付刷机件：`/workspace/crosspoint_eegoA4_b65-s3c-pf8_factory.bin`（待真机验收）
 - 边界不变：APK/协议/B3/0x07-0x08 零触碰；熔断令有效；不开 S4
 
-## S3cPF8b — CJK 空白统一清洗 + justify 负 gap（b65-s3c-pf8b）
+## S3cPF8b — CJK 空白统一清洗 + justify 负 gap（b65-s3c-pf8b）【REVERTED / 整批回滚】
+- **【2026-11-21 真机判定 FAILED → 整批回滚】**：真机三重回归——① 《骆驼祥子》styles on 由正常变乱（16/63，旧 off 症状 + 叠印）；② styles on/off 排版完全相同，`embeddedStyle` 开关失去区分度；③ 页数 63≈旧 off 的 61 说明清洗未生效，叠印仍在说明负 gap 补丁未生效。pf8b 六处改动四项无效、一项破坏正常路径，不在其上继续修。**整体回滚 6 文件到 pf8 出件状态 `f13cab30`（版本号回 76、负 gap 与 CjkWhitespace.h 一项不留）**，重新出 pf8 回滚件供刷回。详见 `/workspace/S3cPF8b_真机回滚与重新诊断回执.md`。功能提交 `ebe5c072`、基线提交 `36ee2f19` 均标记 reverted，进入档案，不再作为可用基线。
+- 以下为 revert 前的原始记录（留档，不代表当前状态）：
 - 前提：pf8 真机「修复在 EPUB 未生效」不是 pf8 写错——EPUB 乱不来自 justify，而来自上一层内容树构建缺失「CJK 相邻字符间空白剥离」通用步骤。《骆驼祥子》styles on 正常是 span 样式路径副作用兜底，非清洗能力；《十日终焉》裸文本字间空白两路径都没清洗。在 pf8 基础上叠加，未重做、未回退 pf8 justify 0.5 字宽上限。
 - 诊断四问（动手前、不改代码）：`/workspace/S3cPF8b_先答_诊断四问.md`。① 落点＝`characterData()` 空白分支→`addWord()` 之间（两路径汇合后、token 化前），三条禁令全满足；② styles on 靠 `endElement()/startElement()` 的 `isInlineTag → nextWordContinues=true` 吞 span 边界空白，styles off 时 cssParser=null 不触发；TXT→HTML 有 pendingSpaces 折叠+nbsp 保留但无 CJK 判定，思想可复用、代码不可复用；③ `SECTION_FILE_VERSION` 不覆盖 progress.bin，但 `applyDeferredReposition()` 用 visibleTextOffset 在新 LUT 重映射 + 比例兜底吸收页数变化，故 progress 不动、清洗须守住「不改可见偏移计数」；④ styles off 开关来自上游 `63eda54e`（2026-07-22），引入时未测含 span 的书，pf8 测试规范（2026-11-21）晚于开关故未覆盖非默认值路径。
 - 功能提交主仓 `ebe5c072`（6 文件 +297/−10）。新模块 `lib/Epub/Epub/CjkWhitespace.h`（header-only：isCjkText 码点表含 々/ー/〇+扩展块 + shouldStripBetween）；`ChapterHtmlSlimParser.{h,cpp}` 用 `pendingSpaceLeftCp` 把剥离/保留决策延迟到右侧码点，在统一 funnel 判定，跨回调 span 边界与裸文本 run 共用、连续空白折叠、线性单遍、偏移计数不变；`ParsedText.cpp` 补 `computeJustifyExtra` 负 gap 下限（perGap<0→0，pf8 上限保留）；`Section.cpp` 版本 76→77（partial 哨兵派生联动）；测试 +5 断言。

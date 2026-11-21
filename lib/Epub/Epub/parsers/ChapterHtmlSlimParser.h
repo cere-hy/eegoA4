@@ -44,11 +44,6 @@ class ChapterHtmlSlimParser {
   char partWordBuffer[MAX_WORD_SIZE + 1] = {};
   int partWordBufferIndex = 0;
   bool nextWordContinues = false;  // true when next flushed word attaches to previous (inline element boundary)
-  // S3cPF8b: last emitted CJK/other codepoint to the LEFT of a whitespace run.
-  // A run may straddle characterData() callbacks (span boundary) or be a bare-text
-  // run inside one callback; keeping the left codepoint here lets the right-hand
-  // character decide strip-vs-keep at the single funnel below. 0 = no pending run.
-  uint32_t pendingSpaceLeftCp = 0;
   std::unique_ptr<ParsedText> currentTextBlock = nullptr;
   // Ruby text state
   bool inRuby = false;
