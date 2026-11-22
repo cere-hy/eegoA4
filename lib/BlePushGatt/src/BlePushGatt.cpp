@@ -15,11 +15,11 @@
 #include <esp_system.h>
 #include <Logging.h>
 #include <push_ai_seg.h>  // plan B: 0x08/0x18/0x13 opcodes + caps encoder
-#include <esp_bt.h>            // b65-s3c-pf9b-2: controller status/get + adaptive resume
-#include <Arduino.h>           // b65-s3c-pf9b-2: millis() for resume timing; ESP.getFreeHeap for diag
-#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
-#include <esp_heap_caps.h>
-#endif
+#include <esp_bt.h>            // b65-s3c-pf9b-3a: controller status log at stop (no resume)
+#include <esp_system.h>        // esp_reset_reason / esp_get_free_heap_size
+#include <esp_heap_caps.h>     // heap_caps_get_largest_free_block (stop heap probe)
+#include <Arduino.h>           // ESP.getFreeHeap / millis (diag + heap probe)
+#include <nvs_flash.h>         // nvs_open / nvs_entry_find / nvs_erase_key (PANIC cache clear)
 
 #include <cstdarg>
 #include <cstdio>
@@ -52,7 +52,7 @@ NimBLECharacteristic* s_data = nullptr;
 NimBLECharacteristic* s_ctrl = nullptr;
 NimBLECharacteristic* s_statusChr = nullptr;
 std::atomic<bool> s_statusSubscribed{false};  // B4′: STATUS CCCD subscribed by peer
-// b65-s3c-pf9b-2: functional WiFi/BLE time-division state. Sticky DEAD terminal.
+// b65-s3c-pf9b-3a: stop-only WiFi/BLE state (ACTIVE -> STOPPED_FOR_WIFI, no resume).
 std::atomic<uint8_t> s_wifiBleState{static_cast<uint8_t>(WifiBleState::ACTIVE)};
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
 std::atomic<bool> s_memxStopped{false};  // phase-1 one-way ladder latch
@@ -209,6 +209,10 @@ uint16_t tokenFromStaMac() {
 bool begin() {
   if (s_status.initialized) return true;
 
+  // b65-s3c-pf9b-3a: if the previous boot ended in a PANIC, clear NimBLE's
+  // transient NVS cache BEFORE the host re-loads it. Bond keys are preserved.
+  clearBleNvsCacheAfterPanic();
+
   if (!NimBLEDevice::isInitialized()) {
     if (!NimBLEDevice::init("CrossPoint-Push")) {
       log("NimBLE init failed");
@@ -258,8 +262,8 @@ void loop() {
   // try to re-arm advertising against them.
   if (s_memxStopped.load(std::memory_order_acquire)) return;
 #else
-  // b65-s3c-pf9b-2: while WiFi owns the radio (or resume failed terminally),
-  // never re-arm advertising against a deinit'd host.
+  // b65-s3c-pf9b-3a: once stopped for WiFi, stay stopped (no software resume —
+  // push returns only after reboot). Never re-arm advertising on a deinit'd host.
   if (s_wifiBleState.load(std::memory_order_acquire) != static_cast<uint8_t>(WifiBleState::ACTIVE)) return;
 #endif
   if (!s_status.initialized) return;
@@ -320,15 +324,20 @@ void memxWifiInitProbe() {
 }
 #endif
 
-// ---- b65-s3c-pf9b-2 FUNCTIONAL: WiFi/BLE time-division -----------------------
-// L2 teardown. clearAll=false keeps NVS bonds so the phone never needs to
-// re-pair (measured: deinit(false) frees ~41 KB of host internal RAM and lifts
-// maxalloc 7156 -> 26612, enough for WiFi; L3 controller deinit added nothing
-// and returned 0x103, so it is deliberately omitted here).
+// ---- b65-s3c-pf9b-3a FUNCTIONAL: WiFi/BLE time-division (STOP ONLY) ----------
+// L2 teardown on entering the WiFi-settings page. clearAll=false keeps NVS bonds
+// so the phone never re-pairs. There is deliberately NO resume path in this
+// build: BLE stays stopped until the device reboots (clause 1). This removes the
+// deinit(true)+init() + host_task churn that caused the pf9b-2 crash.
 bool stopForWifi() {
   const uint8_t st = s_wifiBleState.load(std::memory_order_acquire);
-  if (st == static_cast<uint8_t>(WifiBleState::DEAD)) return false;  // sticky terminal
   if (st == static_cast<uint8_t>(WifiBleState::STOPPED_FOR_WIFI)) return true;  // idempotent
+
+  // Clause 3: heap probe BEFORE teardown — log only, no decision. Both raw IDs
+  // the sheet asked for: esp_get_free_heap_size + heap_caps_get_largest_free_block.
+  logPrintf("INF", "WFBLE", "[WFBLE] stop pre-heap free=%u maxalloc=%u",
+            static_cast<unsigned>(esp_get_free_heap_size()),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 
   // L1: stop advertising only.
   if (NimBLEDevice::isInitialized()) {
@@ -347,74 +356,66 @@ bool stopForWifi() {
   s_statusSubscribed.store(false, std::memory_order_release);
   s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::STOPPED_FOR_WIFI), std::memory_order_release);
 
-  // Clause: real-device one-shot confirmation of the controller state that the
-  // adaptive resume must handle (必答1). esp_bt_controller_get_status():
+  // One-shot real-device confirmation of the controller state at stop time:
   // 0=IDLE, 1=INITED (initialized but disabled), 2=ENABLED.
   logPrintf("INF", "WFBLE", "[WFBLE] stop done; controller_status=%d",
             static_cast<int>(esp_bt_controller_get_status()));
   return true;
 }
 
-// Conservative scheme A resume. Never bypasses NimBLEDevice::init(): begin()
-// calls it internally. Before that, read the controller status (必答1) and,
-// only if needed, move the controller back to IDLE so init()'s internal
-// esp_bt_controller_init()/enable() won't fail with 0x103. Branch taken (必答3)
-// and every deinit() return code (必答2) are logged under tag "WFBLE".
-bool resumeForWifi() {
-  const uint8_t st0 = s_wifiBleState.load(std::memory_order_acquire);
-  if (st0 == static_cast<uint8_t>(WifiBleState::DEAD)) {
-    logPrintf("INF", "WFBLE", "[WFBLE] resume skipped (DEAD terminal)");
-    return false;
-  }
-  if (st0 == static_cast<uint8_t>(WifiBleState::ACTIVE)) {
-    return true;  // idempotent: nothing was torn down
-  }
+// Clause 4: on a boot that followed a PANIC, erase NimBLE's TRANSIENT NVS cache
+// so a corrupted CCCD/peer record cannot be re-loaded into a fresh host task.
+// Security of the whitelist: only the known cache-key prefixes are deleted;
+// the pairing keys (peer_sec / our_sec / local_irk) are NEVER touched, so the
+// phone stays bonded and never needs re-pairing.
+//
+// NVS namespace "nimble_bond" keys (from NimBLE ble_store_nvs.c):
+//   bond / KEEP : peer_sec_<n>  our_sec_<n>  local_irk[_<n>]
+//   cache/ ERASE: cccd_sec_<n>  p_dev_rec_<n>  rpa_rec_<n>  csfc_sec_<n>  ead_sec_<n>
+void clearBleNvsCacheAfterPanic() {
+  const esp_reset_reason_t rr = esp_reset_reason();
+  if (rr != ESP_RST_PANIC) return;  // clean boot: leave NVS untouched
 
-  s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::RESUMING), std::memory_order_release);
-  const uint32_t t0 = static_cast<uint32_t>(millis());
+  // Static const prefix list — no heap allocation, safe even under pressure.
+  static const char* const kCachePrefixes[] = {
+      "cccd_sec_", "p_dev_rec_", "rpa_rec_", "csfc_sec_", "ead_sec_"};
+  constexpr size_t kNumPrefixes = sizeof(kCachePrefixes) / sizeof(kCachePrefixes[0]);
 
-  const esp_bt_controller_status_t cst = esp_bt_controller_get_status();
-  logPrintf("INF", "WFBLE", "[WFBLE] resume start; controller_status=%d", static_cast<int>(cst));
-
-  // Scheme A: adapt controller state only, never bypass NimBLEDevice::init().
-  // begin() -> NimBLEDevice::init() -> esp_bt_controller_init()+enable() requires
-  // the controller to be IDLE first; if it is still INITIALIZED/ENABLED, bring
-  // it down here so init() can rebuild it cleanly.
-  if (cst == ESP_BT_CONTROLLER_STATUS_ENABLED) {
-    logPrintf("INF", "WFBLE", "[WFBLE] branch=ENABLED");
-    const esp_err_t rcDis = esp_bt_controller_disable();
-    logPrintf("INF", "WFBLE", "[WFBLE] controller_disable rc=0x%X", static_cast<unsigned>(rcDis));
-    const esp_err_t rcDeinit = esp_bt_controller_deinit();
-    logPrintf("INF", "WFBLE", "[WFBLE] controller_deinit rc=0x%X", static_cast<unsigned>(rcDeinit));
-  } else if (cst == ESP_BT_CONTROLLER_STATUS_INITED) {
-    logPrintf("INF", "WFBLE", "[WFBLE] branch=INITED");
-    const esp_err_t rcDeinit = esp_bt_controller_deinit();
-    logPrintf("INF", "WFBLE", "[WFBLE] controller_deinit rc=0x%X", static_cast<unsigned>(rcDeinit));
-  } else if (cst == ESP_BT_CONTROLLER_STATUS_IDLE) {
-    logPrintf("INF", "WFBLE", "[WFBLE] branch=IDLE (init directly)");
-  } else {
-    logPrintf("INF", "WFBLE", "[WFBLE] branch=OTHER(%d); attempting init as-is", static_cast<int>(cst));
+  // Iterate the namespace with a read-write handle; collect matching keys
+  // first, then erase. Erasing during iteration is avoided (iterator safety).
+  nvs_handle_t h;
+  if (nvs_open("nimble_bond", NVS_READWRITE, &h) != ESP_OK) {
+    logPrintf("INF", "WFBLE", "[WFBLE] nvs-cache-clear open FAILED; bond untouched");
+    return;
   }
 
-  // deinit(false) at stop time deliberately kept the C++ GATT objects (bonds
-  // live in NVS, not in them), but their NimBLE handles are stale now. Reclaim
-  // them before begin() rebuilds the server/service table — deinit(true) only
-  // deletes those C++ objects; it never touches NVS bonds. m_initialized is
-  // already false so the port stop/deinit part is skipped.
-  NimBLEDevice::deinit(true);
-
-  // Rebuild via the normal begin() path (which calls NimBLEDevice::init()).
-  const bool ok = begin();
-  const uint32_t elapsed = static_cast<uint32_t>(millis()) - t0;
-  if (!ok) {
-    s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::DEAD), std::memory_order_release);
-    logPrintf("INF", "WFBLE", "[WFBLE] resume FAILED in %ums -> DEAD", elapsed);
-    return false;
+  char keys[32][NVS_KEY_NAME_MAX_SIZE] = {};
+  uint8_t keyCount = 0;
+  nvs_iterator_t it = nullptr;
+  esp_err_t e = nvs_entry_find(nullptr, "nimble_bond", NVS_TYPE_ANY, &it);
+  while (e == ESP_OK && it != nullptr && keyCount < 32) {
+    nvs_entry_info_t info;
+    if (nvs_entry_info(it, &info) == ESP_OK) {
+      for (size_t p = 0; p < kNumPrefixes; ++p) {
+        if (strncmp(info.key, kCachePrefixes[p], strlen(kCachePrefixes[p])) == 0) {
+          snprintf(keys[keyCount], sizeof(keys[0]), "%s", info.key);
+          ++keyCount;
+          break;
+        }
+      }
+    }
+    e = nvs_entry_next(&it);
   }
-  s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::ACTIVE), std::memory_order_release);
-  logPrintf("INF", "WFBLE", "[WFBLE] resume OK in %ums; advertising=%d discoverable", elapsed,
-            s_status.advertising ? 1 : 0);
-  return true;
+  if (it != nullptr) nvs_release_iterator(it);
+
+  uint8_t erased = 0;
+  for (uint8_t i = 0; i < keyCount; ++i) {
+    if (nvs_erase_key(h, keys[i]) == ESP_OK) ++erased;
+  }
+  if (keyCount > 0) nvs_commit(h);
+  nvs_close(h);
+  logPrintf("INF", "WFBLE", "[WFBLE] nvs-cache-clear panic=1 erased=%u/%u bond_keys_kept",
+            erased, keyCount);
 }
 
 WifiBleState wifiBleState() {
@@ -522,7 +523,7 @@ bool canNotifyScene() { return false; }
 bool sendStatusFrame(const uint8_t*, size_t) { return false; }
 WifiBleState wifiBleState() { return WifiBleState::ACTIVE; }
 bool stopForWifi() { return true; }
-bool resumeForWifi() { return true; }
+void clearBleNvsCacheAfterPanic() {}
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
 void memxStopLadder() {}
 bool memxStopped() { return false; }

@@ -103,15 +103,12 @@ void WifiSelectionActivity::onEnter() {
   blepushgatt::memxStopLadder();
   blepushgatt::memxWifiInitProbe();
 #else
-  // ---- b65-s3c-pf9b-2 FUNCTIONAL: enter WiFi page -> stop BLE (L2) ----------
-  // Scheme A: BLE is paused for the whole time this page is open. Idempotent —
-  // stopForWifi() no-ops if already stopped/dead. Successful stop marks that
-  // onExit must resume. A DEAD terminal is never retried.
+  // ---- b65-s3c-pf9b-3a FUNCTIONAL: enter WiFi page -> stop BLE (L2) ---------
+  // Stop-only: BLE is torn down on entry and stays off until a device reboot.
+  // No onExit / failure resume path exists in this build (clause 1).
   if (blepushgatt::stopForWifi()) {
     bleStoppedForWifi = (blepushgatt::wifiBleState() == blepushgatt::WifiBleState::STOPPED_FOR_WIFI);
   }
-  bleDead = (blepushgatt::wifiBleState() == blepushgatt::WifiBleState::DEAD);
-  pushRestored = false;
 #endif
 
   // Load saved WiFi credentials - SD card operations need lock as we use SPI
@@ -203,40 +200,10 @@ void WifiSelectionActivity::onExit() {
   WiFi.scanDelete();
   LOG_DBG("WIFI", "Free heap after scanDelete: %d bytes", ESP.getFreeHeap());
 
-#if !defined(PF9B_MEMX_DIAG) || !PF9B_MEMX_DIAG
-  // Scheme A: leaving the page always restores BLE (exit is the single resume
-  // trigger; no reliance on the user tapping "WiFi off"). Idempotent + DEAD-safe
-  // inside resumeForWifi().
-  if (bleStoppedForWifi && !bleDead) {
-    blepushgatt::resumeForWifi();
-    bleStoppedForWifi = false;
-  }
-#endif
+  // b65-s3c-pf9b-3a: NO resume on exit. BLE stays stopped until reboot; push
+  // recovery is a user-visible "reboot to restore" hint, not a software action.
 
   LOG_DBG("WIFI", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
-}
-
-void WifiSelectionActivity::restoreBleOnFailure() {
-  // Clause 6 (the crux): on ANY WiFi failure, restore BLE FIRST, then tell the
-  // user. Never leave the device in the black-hole state "WiFi down + BLE down".
-  // The hints are static i18n literals pulled after the restore, so the restore
-  // path itself allocates no large buffer.
-#if !defined(PF9B_MEMX_DIAG) || !PF9B_MEMX_DIAG
-  if (bleStoppedForWifi && !bleDead) {
-    const bool ok = blepushgatt::resumeForWifi();
-    bleStoppedForWifi = false;
-    if (ok) {
-      // Resume succeeded: keep the page open with a concise "restored" hint.
-      pushRestored = true;
-      bleDead = false;
-    } else {
-      // Clause 9 fallback: resume terminally failed -> BLE_DEAD. Show the
-      // reboot hint and stop retrying (resumeForWifi now short-circuits).
-      bleDead = true;
-      pushRestored = false;
-    }
-  }
-#endif
 }
 
 void WifiSelectionActivity::startWifiScan(const bool autoScan) {
@@ -652,13 +619,8 @@ void WifiSelectionActivity::checkConnectionStatus() {
       handleAutoConnectFailure();
       return;
     }
-    // Terminal failure: restore BLE first, then set the user hint.
-    restoreBleOnFailure();
-    if (bleDead) {
-      connectionError = tr(STR_PUSH_STOPPED_REBOOT);
-    } else if (pushRestored) {
-      connectionError = tr(STR_WIFI_FAILED_PUSH_RESTORED);
-    }
+    // b65-s3c-pf9b-3a: no BLE restore on failure. BLE stays stopped until
+    // reboot (the fixed page hint tells the user). Keep the real WiFi error.
     state = WifiSelectionState::CONNECTION_FAILED;
     requestUpdate();
     return;
@@ -673,13 +635,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
       handleAutoConnectFailure();
       return;
     }
-    // Terminal failure: restore BLE first, then set the user hint.
-    restoreBleOnFailure();
-    if (bleDead) {
-      connectionError = tr(STR_PUSH_STOPPED_REBOOT);
-    } else if (pushRestored) {
-      connectionError = tr(STR_WIFI_FAILED_PUSH_RESTORED);
-    }
+    // b65-s3c-pf9b-3a: no BLE restore on failure. Keep the real WiFi error.
     state = WifiSelectionState::CONNECTION_FAILED;
     requestUpdate();
     return;
@@ -961,12 +917,11 @@ void WifiSelectionActivity::render(RenderLock&&) {
                     cachedMacAddress.c_str());
 
 #if !defined(PF9B_MEMX_DIAG) || !PF9B_MEMX_DIAG
-  // b65-s3c-pf9b-2 scheme A: fixed line under the title — push is paused for
-  // the whole time WiFi settings is open. Static i18n literal, no allocation.
-  // BLE_DEAD is terminal: tell the user to reboot instead of "paused".
+  // b65-s3c-pf9b-3a: fixed line under the title — push is paused for the whole
+  // WiFi session and only returns after a device reboot. Static i18n literal.
   UITheme::drawCenteredText(renderer, screen, SMALL_FONT_ID,
                             metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + 2,
-                            bleDead ? tr(STR_PUSH_STOPPED_REBOOT) : tr(STR_WIFI_PAUSES_PUSH), true);
+                            tr(STR_WIFI_PAUSES_PUSH), true);
 #endif
 
   switch (state) {

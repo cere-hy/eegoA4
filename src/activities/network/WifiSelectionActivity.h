@@ -73,11 +73,9 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   std::string connectedIP;
   std::string connectionError;
 
-  // b65-s3c-pf9b-2: WiFi/BLE time-division status (scheme A).
+  // b65-s3c-pf9b-3a: stop-only WiFi/BLE time-division. BLE is torn down on
+  // entering this page and NEVER resumed in software (push returns on reboot).
   bool bleStoppedForWifi = false;  // this page performed the L2 teardown
-  bool bleDead = false;            // BLE resume terminally failed (BLE_DEAD)
-  bool pushRestored = false;       // WiFi failed but BLE was restored OK
-  void restoreBleOnFailure();      // clause 6: restore BLE first, then set UI hint
 
   // Password to potentially save (from keyboard or saved credentials)
   std::string enteredPassword;
