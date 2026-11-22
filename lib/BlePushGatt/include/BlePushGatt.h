@@ -93,6 +93,33 @@ bool canNotifyScene();
 // sink can also emit an explicit failure status. No-op when no link/subscribe.
 bool sendStatusFrame(const uint8_t* frame, size_t len);
 
+// ---- b65-s3c-pf9b-2 FUNCTIONAL: WiFi/BLE time-division (phase 2) -------------
+// State of the push peripheral with respect to the WiFi-settings page. The
+// DEAD terminal state is sticky: once resume fails, no further resume is
+// attempted (avoids repeated retries piling up repeated failures).
+enum class WifiBleState : uint8_t {
+  ACTIVE = 0,        // BLE resident, normal operation
+  STOPPED_FOR_WIFI, // L2 teardown done; WiFi owns the radio
+  RESUMING,         // resume in progress
+  DEAD,             // resume failed; push stopped, reboot required
+};
+WifiBleState wifiBleState();
+
+// L2 teardown on entering the WiFi-settings page: stop advertising, then
+// NimBLEDevice::deinit(false) (host resources released, NVS bonds preserved).
+// Idempotent. Logs the post-deinit esp_bt_controller_get_status() value so a
+// single real-device run confirms which controller state the adaptive resume
+// must handle. No-op (returns false) when already DEAD.
+bool stopForWifi();
+
+// Adaptive resume on exiting the WiFi page / on WiFi failure. Conservative
+// scheme A: never bypass NimBLEDevice::init() — read esp_bt_controller_get_status()
+// first, move the controller to IDLE only if needed, then call init() through the
+// normal begin() path. Logs branch taken, deinit() return code and wall-clock ms
+// to tag "WFBLE" for one-shot real-device confirmation. Returns true on success;
+// on failure enters the DEAD terminal state and returns false. Idempotent.
+bool resumeForWifi();
+
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
 // ---- b65-s3c-pf9b PHASE 1 DIAGNOSTIC ONLY (macro-isolated) --------------------
 // Tear the BLE stack down one level at a time and emit a [MEMX] free/maxalloc
