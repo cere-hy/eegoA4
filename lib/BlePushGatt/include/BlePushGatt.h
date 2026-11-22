@@ -4,6 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 
+// b65-s3c-pf9b phase-1 diagnostic switch (WiFi/BLE lifecycle only).
+#include "Pf9bDiagConfig.h"
+
 // System-level BLE push peripheral (EEGO A4 rebuild, batch B3).
 //
 // Owns a NimBLE GATT server whose service table is copied byte-for-byte from the
@@ -89,5 +92,21 @@ bool canNotifyScene();
 // value buffer). Sent automatically on CCCD subscribe for 0x18; exposed so the
 // sink can also emit an explicit failure status. No-op when no link/subscribe.
 bool sendStatusFrame(const uint8_t* frame, size_t len);
+
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+// ---- b65-s3c-pf9b PHASE 1 DIAGNOSTIC ONLY (macro-isolated) --------------------
+// Tear the BLE stack down one level at a time and emit a [MEMX] free/maxalloc
+// snapshot after each level: idle -> stop_adv -> disable_bd -> disable_ctrl.
+// The ladder is intentionally one-way (the host/controller are not re-armed);
+// it exists solely to measure how much internal RAM each level releases so the
+// phase-2 stop level can be chosen. Absent from every functional build.
+void memxStopLadder();
+// True once the diagnostic ladder has torn the stack down; loop() then becomes
+// a no-op so no callback resurrects advertising against a deinit'd controller.
+bool memxStopped();
+// Probe esp_wifi_init() explicitly and log its real return code + heap snapshot.
+// Called before the Arduino WiFi wrapper first touches the radio.
+void memxWifiInitProbe();
+#endif
 
 }  // namespace blepushgatt

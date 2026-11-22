@@ -15,6 +15,11 @@
 #include <esp_system.h>
 #include <Logging.h>
 #include <push_ai_seg.h>  // plan B: 0x08/0x18/0x13 opcodes + caps encoder
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+#include <Arduino.h>           // ESP.getFreeHeap / ESP.getMaxAllocHeap
+#include <esp_bt.h>            // esp_bt_controller_disable / deinit (phase-1 ladder)
+#include <esp_heap_caps.h>
+#endif
 
 #include <cstdarg>
 #include <cstdio>
@@ -47,9 +52,15 @@ NimBLECharacteristic* s_data = nullptr;
 NimBLECharacteristic* s_ctrl = nullptr;
 NimBLECharacteristic* s_statusChr = nullptr;
 std::atomic<bool> s_statusSubscribed{false};  // B4′: STATUS CCCD subscribed by peer
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+std::atomic<bool> s_memxStopped{false};  // phase-1 one-way ladder latch
+#endif
 
 void log(const char* fmt, ...);
 void startAdvertising();
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+void memxSnap(const char* stage);
+#endif
 
 // CTRL opcodes (push_proto.h, frozen).
 constexpr uint8_t kOpBegin = 0x01;
@@ -155,6 +166,15 @@ void log(const char* fmt, ...) {
   logPrintf("INF", "BLE", "PUSH %s", line);
 }
 
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+// Phase-1 measurement snapshot. Internal-RAM free + largest contiguous block,
+// printed with the exact [MEMX] prefix the acceptance sheet greps for.
+void memxSnap(const char* stage) {
+  logPrintf("INF", "MEMX", "[MEMX] stage=%-14s free=%u maxalloc=%u", stage,
+            static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+}
+#endif
+
 void startAdvertising() {
   if (s_server == nullptr) return;
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -231,11 +251,76 @@ bool begin() {
 }
 
 void loop() {
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+  // After the one-way measurement ladder the host/controller are gone; never
+  // try to re-arm advertising against them.
+  if (s_memxStopped.load(std::memory_order_acquire)) return;
+#endif
   if (!s_status.initialized) return;
   if (!g_bleConnected.load(std::memory_order_acquire) && !s_status.advertising) {
     startAdvertising();
   }
 }
+
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+// ---- b65-s3c-pf9b phase-1 one-way teardown ladder (DIAGNOSTIC ONLY) -----------
+// Levels are cumulative: idle -> stop advertising -> deinit NimBLE host (bond
+// preserved) -> deinit BT controller. A snapshot is taken after each level so
+// the acceptance sheet can see exactly how much internal RAM each releases and
+// decide the minimum safe stop level for the phase-2 functional build.
+void memxStopLadder() {
+  if (s_memxStopped.load(std::memory_order_acquire)) return;  // idempotent
+
+  // L0: BLE resident, WiFi not yet initialised by this screen.
+  memxSnap("idle");
+
+  // L1: stop advertising only — host and controller stay up.
+  if (NimBLEDevice::isInitialized()) {
+    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+    if (adv != nullptr) adv->stop();
+  }
+  s_status.advertising = false;
+  delay(50);
+  memxSnap("stop_adv");
+
+  // L2: deinit the NimBLE host. clearAll=false keeps bonds in NVS (clause 10:
+  // pairing must survive; this level is the fallback if controller deinit
+  // loses pairing). On IDF 5.x deinit() stops/deinits nimble_port but leaves the
+  // controller allocated, so it does NOT by itself release the ~46.5 KB block.
+  if (NimBLEDevice::isInitialized()) {
+    NimBLEDevice::deinit(false);
+  }
+  s_status.initialized = false;
+  s_status.advertising = false;
+  s_server = nullptr;
+  s_data = s_ctrl = s_statusChr = nullptr;
+  delay(50);
+  memxSnap("disable_bd");
+
+  // L3: deinit the BT controller — this releases the libbtdm + task-stack
+  // internal RAM that WiFi's init peak needs. Disable first (deinit requires a
+  // disabled controller); tolerate either return code, the snapshot is truth.
+  esp_err_t rc = esp_bt_controller_disable();
+  log("memx controller disable rc=0x%X", static_cast<unsigned>(rc));
+  delay(20);
+  rc = esp_bt_controller_deinit();
+  log("memx controller deinit rc=0x%X", static_cast<unsigned>(rc));
+  delay(50);
+  memxSnap("disable_ctrl");
+
+  s_memxStopped.store(true, std::memory_order_release);
+}
+
+bool memxStopped() { return s_memxStopped.load(std::memory_order_acquire); }
+
+void memxWifiInitProbe() {
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  const esp_err_t rc = esp_wifi_init(&cfg);
+  logPrintf("INF", "MEMX", "[MEMX] wifi after_init   free=%u maxalloc=%u rc=0x%X",
+            static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()),
+            static_cast<unsigned>(rc));
+}
+#endif
 
 const Status& status() { return s_status; }
 void setDataHandler(DataHandler h) { s_dataHandler = h; }
@@ -336,6 +421,11 @@ bool radioOwned() { return false; }
 bool sendSceneFrame(const uint8_t*, size_t) { return false; }
 bool canNotifyScene() { return false; }
 bool sendStatusFrame(const uint8_t*, size_t) { return false; }
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+void memxStopLadder() {}
+bool memxStopped() { return false; }
+void memxWifiInitProbe() {}
+#endif
 }  // namespace blepushgatt
 
 #endif

@@ -7,6 +7,8 @@
 #include <TrustedTime.h>
 #include <WiFi.h>
 #include <esp_mac.h>
+#include <BlePushGatt.h>   // b65-s3c-pf9b: also carries the phase-1 diag switch
+#include <esp_wifi.h>
 
 #include <algorithm>
 
@@ -89,6 +91,18 @@ void WifiSelectionActivity::onPromptEvent(const fui::ActionEvent& event, void* u
 
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
+
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+  // ---- b65-s3c-pf9b phase-1 measurement (DIAGNOSTIC ONLY) --------------------
+  // Entering the WiFi screen is the trigger. Capture the pre-init baseline,
+  // tear BLE down one level at a time (each level emits its own [MEMX] line),
+  // then probe esp_wifi_init()'s real return code. The normal scan/connect flow
+  // below then proceeds and emits the remaining [MEMX] wifi stage lines.
+  logPrintf("INF", "MEMX", "[MEMX] wifi before_init  free=%u maxalloc=%u",
+            static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  blepushgatt::memxStopLadder();
+  blepushgatt::memxWifiInitProbe();
+#endif
 
   // Load saved WiFi credentials - SD card operations need lock as we use SPI
   // for both
@@ -191,7 +205,14 @@ void WifiSelectionActivity::startWifiScan(const bool autoScan) {
   requestUpdate();
 
   // Set WiFi mode to station
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+  const bool memxModeOk = WiFi.mode(WIFI_STA);
+  logPrintf("INF", "MEMX", "[MEMX] wifi after_start  free=%u maxalloc=%u rc=0x%X",
+            static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()),
+            static_cast<unsigned>(memxModeOk ? 0 : 1));
+#else
   WiFi.mode(WIFI_STA);
+#endif
   WiFi.disconnect();
   delay(100);
 
@@ -487,6 +508,10 @@ void WifiSelectionActivity::attemptConnection() {
     LOG_ERR("WIFI", "Failed to read station MAC for hostname (err=%d)", static_cast<int>(macResult));
   }
 
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+  logPrintf("INF", "MEMX", "[MEMX] wifi before_connect free=%u maxalloc=%u",
+            static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+#endif
   if (selectedRequiresPassword && !enteredPassword.empty()) {
     WiFi.begin(selectedSSID.c_str(), enteredPassword.c_str());
   } else {
@@ -500,6 +525,17 @@ void WifiSelectionActivity::checkConnectionStatus() {
   }
 
   const wl_status_t status = WiFi.status();
+
+#if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
+  // One line per connection result so the acceptance sheet can read the exact
+  // wl_status_t that accompanied the heap snapshot (NO_MEM surfaces as a failed
+  // status + a stalled connect). Emitted only on a terminal outcome.
+  if (status == WL_CONNECTED || status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
+    logPrintf("INF", "MEMX", "[MEMX] wifi connect_event evt=%d rc=0x%X free=%u maxalloc=%u",
+              static_cast<int>(status), 0u, static_cast<unsigned>(ESP.getFreeHeap()),
+              static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  }
+#endif
 
   if (status == WL_CONNECTED) {
     // Successfully connected
