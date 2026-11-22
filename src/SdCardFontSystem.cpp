@@ -623,6 +623,9 @@ bool SdCardFontSystem::loadTtfVariant(const uint8_t pointSize, const int fontId)
   font->build(" ");
   renderer_->insertFont(fontId, font->family());
   renderer_->registerTtfFont(fontId, font.get());
+#if defined(PF8E7_ADV_TRACE)
+  font->setDiagFontId(fontId);  // DIAG only; stamp for [ADV] trace
+#endif
   ttfVariants_.push_back({fontId, ++variantClock_, std::move(font)});
   return true;
 }
@@ -877,6 +880,9 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
       ttfFontId_ = computeTtfFontId(family.name.c_str(), size);
       renderer.insertFont(ttfFontId_, ttf_->family());
       renderer.registerTtfFont(ttfFontId_, ttf_.get());
+#if defined(PF8E7_ADV_TRACE)
+      ttf_->setDiagFontId(ttfFontId_);  // DIAG only; stamp for [ADV] trace
+#endif
       ttfPointSize_ = size;
       // S3c-plus2: reader face rebuilt at new size — rewire its fallback ctx.
       refreshSdVectorFallback();
@@ -947,6 +953,9 @@ void SdCardFontSystem::loadTtfFamily(const SdCardFontFamilyInfo& family, GfxRend
   ttfFontId_ = computeTtfFontId(family.name.c_str(), size);
   renderer.insertFont(ttfFontId_, ttf_->family());
   renderer.registerTtfFont(ttfFontId_, ttf_.get());
+#if defined(PF8E7_ADV_TRACE)
+  ttf_->setDiagFontId(ttfFontId_);  // DIAG only; stamp for [ADV] trace
+#endif
   ttfFamily_ = family.name;
   ttfPointSize_ = size;
   // S3c+: keep PUSH/FAST tier③ pointing at the freshly (re)loaded SD face.

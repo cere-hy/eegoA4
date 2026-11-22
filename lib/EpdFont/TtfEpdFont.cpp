@@ -35,6 +35,19 @@ inline void add(const uint32_t t0) {
 }  // namespace glyphprof
 #endif
 
+#if defined(PF8E7_ADV_TRACE)
+// S3cPF8e-7 DIAG ONLY. One line per getAdvance() call, both the first (cold,
+// src=M/F/A) computation and every later hot-table hit (src=H). `raw` is the
+// font-unit advanceWidth read back from the attached FontMap when available
+// (0 for built-in/PIF1 faces with no FontMap), so a stale 26_4 value served
+// from the hot table can be matched against the font's real upem.
+inline void advTrace(const uint32_t cp, const char src, const uint32_t raw,
+                     const uint16_t fin26_4, const uint16_t sizePt, const int fid) {
+  LOG_INF("ADV", "cp=%04X src=%c raw=%u fin26_4=%d size=%u fid=%d",
+          cp, src, raw, (int)fin26_4, sizePt, fid);
+}
+#endif
+
 // S3c-final P0#3 guard: an advance-table buffer must live in WRITABLE RAM.
 // Flash DROM is cache-mapped into the same 0x3Cxx.... window as PSRAM, so a
 // raw address-range test cannot tell them apart — use the ESP memory utils.
@@ -182,6 +195,7 @@ bool TtfEpdFont::load(const uint16_t pointSize, const bool twoBit, const size_t 
     // Advance values depend on size26_6_; a reload at a new point size must
     // drop cached advances or measure would disagree with draw.
     freeink::font::PsramVector<Face::AdvanceEntry>().swap(f.advances);
+    ++advanceGeneration_;                // S3cPF8e-8: invalidate any surviving rows
     f.ligPairCount = 0;                  // re-resolved in initFace; stale pairs must not leak
     for (uint32_t& g : f.ligGid) g = 0;  // across a reload with new sources
   }
@@ -225,6 +239,7 @@ bool TtfEpdFont::loadVariantOf(TtfEpdFont& master, const uint16_t pointSize, con
     f.initFailures = 0;
     flushFace(f);
     freeink::font::PsramVector<Face::AdvanceEntry>().swap(f.advances);
+    ++advanceGeneration_;                // S3cPF8e-8: invalidate advance rows on variant init
     f.ligPairCount = 0;
     for (uint32_t& g : f.ligGid) g = 0;
   }
@@ -439,6 +454,7 @@ void TtfEpdFont::releaseResidentCaches() {
     freeink::font::PsramVector<uint32_t>().swap(f.cps);
     freeink::font::PsramVector<uint16_t>().swap(f.slot);
     freeink::font::PsramVector<Face::AdvanceEntry>().swap(f.advances);
+    ++advanceGeneration_;                // S3cPF8e-8: invalidate advance rows on cache release
     freeink::font::PsramVector<uint64_t>().swap(f.kernKeys);
     freeink::font::PsramVector<int8_t>().swap(f.kernVals);
     // Keep the regular face's FreeType face live so coverage()/metrics still
@@ -701,6 +717,19 @@ const EpdGlyph* TtfEpdFont::findGlyph(Face& f, const uint32_t cp) const {
   return nullptr;
 }
 
+// S3cPF8e-8: the single conversion口径 for every rawAw source. The FtFont is
+// SHARED across all variants of this family, so its FT_Face may currently be
+// sized for a sibling variant. Align it to THIS variant's size26_6_ before
+// reading x_scale — otherwise the multiply uses the wrong ppem. ensureSize26_6
+// caches its target, so an unchanged size is a no-op (no FT_Set_Char_Size).
+bool TtfEpdFont::advance12_4FromRaw(Face& f, uint16_t rawAw, int32_t& adv12_4) {
+  if (!f.ft->ensureSizeForAdvance(size26_6_)) return false;
+  int32_t adv26 = 0;
+  if (!f.ft->unitsToAdvance26_6(rawAw, adv26)) return false;
+  adv12_4 = fp4::truncate26_6_to_4(adv26);
+  return true;
+}
+
 // S3c final — advance-only query for layout measurement. NEVER rasterizes.
 // The advance returned is byte-identical to what faultGlyph() would cache
 // (same gm.advance26_6 -> truncate26_6_to_4, or the same secondary source), so
@@ -708,43 +737,94 @@ const EpdGlyph* TtfEpdFont::findGlyph(Face& f, const uint32_t cp) const {
 // codepoint per face and the 12.4 result lives in `f.advances`, which persists
 // across page turns (unlike the rasterized glyph arena).
 bool TtfEpdFont::getAdvance(const uint32_t cp, const uint8_t style, uint16_t& adv12_4) {
+#if defined(PF8E7_ADV_TRACE)
+  char advSrc = 'N';       // H=hot table, M=FontMap, F=FreeType, A=handler, N=none
+  uint32_t advRaw = 0;     // font-unit advanceWidth from FontMap (0 if no map)
+  auto emitAdv = [&](const uint16_t fin) {
+    advTrace(cp, advSrc, advRaw, fin, pointSize_, diagFontId_);
+  };
+  // A cold call succeeds through the hot table only when a prior call already
+  // cached this cp; stamp `raw` from the map so a stale 26_4 can be diagnosed.
+  auto lookupRaw = [&]() {
+    if (fontMap_) { uint16_t r = 0; if (fontMap_->lookup(cp, r)) advRaw = r; }
+  };
+#endif
   if (style >= 4 || !loaded_) return false;
   Face& f = faces_[style];
   if (!f.inited || (master_ && !master_->faces_[style].ready)) initFace(f);
   if (!f.ready) return false;
 
-  // 1) Served from the persistent advance table — zero FreeType work.
+  // 1) Served from the persistent advance table — no glyph load / SD seek.
+  // S3cPF8e-8: a kAdvRaw row holds size-independent rawAw; convert it through
+  // the SAME helper as the FontMap path so a shared face left at a sibling
+  // size can never yield a wrong-x_scale advance. A kAdvBaked row already holds
+  // the correctly-aligned 12.4 (F/A sources have no font units) and is served
+  // verbatim — no multiply, hence no exposure to the face's current size.
+  // A generation mismatch means an older font map — treat as a miss.
   {
     const auto it = std::lower_bound(f.advances.begin(), f.advances.end(), cp,
                                      [](const Face::AdvanceEntry& e, uint32_t c) { return e.cp < c; });
-    if (it != f.advances.end() && it->cp == cp) {
-      adv12_4 = it->adv12_4;
-      return true;
+    if (it != f.advances.end() && it->cp == cp && it->generation == advanceGeneration_) {
+      if (it->kind == kAdvBaked) {
+        adv12_4 = it->value;
+#if defined(PF8E7_ADV_TRACE)
+        advSrc = 'H'; lookupRaw(); emitAdv(adv12_4);
+#endif
+        return true;
+      }
+      int32_t fin = 0;
+      // Single-threaded layout on this core; FaceLock guards glyph-fault
+      // re-entry (face deinit), not concurrent measure, so the align-in-helper
+      // is safe here ahead of the lock below.
+      if (advance12_4FromRaw(f, it->value, fin)) {
+        adv12_4 = static_cast<uint16_t>(fin < 0 ? 0 : fin);
+#if defined(PF8E7_ADV_TRACE)
+        advSrc = 'H'; advRaw = it->value; emitAdv(adv12_4);
+#endif
+        return true;
+      }
     }
+    // generation mismatch / conversion failure falls through to M/F paths.
   }
 
   // Hard cap: if the table is full, defer to the caller's ordinary (slower)
   // path rather than grow unbounded. Bounded memory, no correctness loss.
   const size_t cap = (style == 0) ? 4096u : 512u;
-  if (f.advances.size() >= cap) return false;
+  if (f.advances.size() >= cap) {
+#if defined(PF8E7_ADV_TRACE)
+    emitAdv(0);
+#endif
+    return false;
+  }
 
   int32_t adv = 0;
   bool have = false;
+  uint16_t storeVal = 0;               // S3cPF8e-8: value written to the hot table
+  uint8_t storeKind = kAdvBaked;       // ...and its kind (default: baked 12.4)
   const size_t faceIdx = static_cast<size_t>(&f - faces_);
   FaceLock lock(master_ ? master_ : this, faceIdx);
 
-  // S3cPF6: consult the load-time advance map BEFORE any FreeType glyph load.
-  // A hit needs only one x_scale multiply (no FT_Load_Glyph, no SD seek into
-  // hmtx) and is byte-identical to metricsGlyph26_6().advance26_6. We store the
-  // result through the SAME advanceTableInsert path below, so the persistent
-  // hot table and measure/draw agreement are unchanged.
+  // S3cPF6/S3cPF8e-8: consult the load-time advance map BEFORE any FreeType
+  // glyph load. A hit needs only one x_scale multiply and is byte-identical to
+  // metricsGlyph26_6().advance26_6 — PROVIDED the shared face is first aligned
+  // to this variant's size. Route through advance12_4FromRaw() for that align,
+  // and cache the size-independent rawAw (not the 12.4) so sibling variants
+  // never inherit a wrong-x_scale row.
   if (fontMap_) {
     uint16_t rawAw = 0;
     if (fontMap_->lookup(cp, rawAw)) {
-      int32_t adv26 = 0;
-      if (f.ft->unitsToAdvance26_6(rawAw, adv26)) {
-        adv = fp4::truncate26_6_to_4(adv26);
+#if defined(PF8E7_ADV_TRACE)
+      advRaw = rawAw;
+#endif
+      int32_t fin = 0;
+      if (advance12_4FromRaw(f, rawAw, fin)) {
+        adv = fin;
         have = true;
+        storeVal = rawAw;
+        storeKind = kAdvRaw;
+#if defined(PF8E7_ADV_TRACE)
+        advSrc = 'M';
+#endif
       }
     }
   }
@@ -758,6 +838,12 @@ bool TtfEpdFont::getAdvance(const uint32_t cp, const uint8_t style, uint16_t& ad
     if (f.ft->metricsGlyph26_6(useGid, size26_6_, gm)) {
       adv = fp4::truncate26_6_to_4(gm.advance26_6);
       have = true;
+      // metricsGlyph26_6 aligned the face to size26_6_; this 12.4 is final.
+      storeVal = static_cast<uint16_t>(adv < 0 ? 0 : adv);
+      storeKind = kAdvBaked;
+#if defined(PF8E7_ADV_TRACE)
+      advSrc = 'F'; lookupRaw();
+#endif
     }
   }
   if (!have && advanceHandler_ != nullptr) {
@@ -766,9 +852,19 @@ bool TtfEpdFont::getAdvance(const uint32_t cp, const uint8_t style, uint16_t& ad
     if (advanceHandler_(advanceCtx_, cp, static_cast<uint8_t>(style), *this, secondaryAdv)) {
       adv = secondaryAdv;
       have = true;
+      storeVal = secondaryAdv;   // handler gives 12.4 directly (no font units)
+      storeKind = kAdvBaked;
+#if defined(PF8E7_ADV_TRACE)
+      advSrc = 'A';
+#endif
     }
   }
-  if (!have) return false;
+  if (!have) {
+#if defined(PF8E7_ADV_TRACE)
+    emitAdv(0);
+#endif
+    return false;
+  }
 
   // S3c-final P0#3 ROOT-CAUSE FIX:
   // The previous code computed `pos = lower_bound(...)` BEFORE reserveChecked().
@@ -780,13 +876,31 @@ bool TtfEpdFont::getAdvance(const uint32_t cp, const uint8_t style, uint16_t& ad
   // Fix: grow FIRST (shared AdvanceTable.h, same code the host test runs), then
   // validate the buffer is writable, then insert from the STABLE buffer.
   static constexpr size_t kAdvanceStep = 64;
-  if (!epd::advanceTableReserve(f.advances, f.advances.size() + 1, kAdvanceStep, cap, canGrow)) return false;
+  if (!epd::advanceTableReserve(f.advances, f.advances.size() + 1, kAdvanceStep, cap, canGrow)) {
+#if defined(PF8E7_ADV_TRACE)
+    emitAdv(0);
+#endif
+    return false;
+  }
   // Defence in depth: never write if the (possibly reallocated) buffer is not
   // in writable RAM. Falling back to the ordinary slow path is always safe.
-  if (!writableRam(f.advances.data())) return false;
-  const uint16_t store = static_cast<uint16_t>(adv < 0 ? 0 : adv);
-  if (!epd::advanceTableInsert(f.advances, Face::AdvanceEntry{cp, store}, kAdvanceStep, cap, canGrow)) return false;
-  adv12_4 = store;
+  if (!writableRam(f.advances.data())) {
+#if defined(PF8E7_ADV_TRACE)
+    emitAdv(0);
+#endif
+    return false;
+  }
+  const Face::AdvanceEntry entry{cp, storeVal, advanceGeneration_, storeKind};
+  if (!epd::advanceTableInsert(f.advances, entry, kAdvanceStep, cap, canGrow)) {
+#if defined(PF8E7_ADV_TRACE)
+    emitAdv(0);
+#endif
+    return false;
+  }
+  adv12_4 = static_cast<uint16_t>(adv < 0 ? 0 : adv);
+#if defined(PF8E7_ADV_TRACE)
+  emitAdv(adv12_4);
+#endif
   return true;
 }
 
@@ -800,12 +914,20 @@ bool TtfEpdFont::primaryAdvanceOnly(const uint32_t cp, const uint8_t style, uint
   if (!f.inited || (master_ && !master_->faces_[style].ready)) initFace(f);
   if (!f.ready) return false;
   // Own persistent table first (zero FreeType work).
+  // S3cPF8e-8: honour the same kind/generation semantics as getAdvance's H hit.
   {
     const auto it = std::lower_bound(f.advances.begin(), f.advances.end(), cp,
                                      [](const Face::AdvanceEntry& e, uint32_t c) { return e.cp < c; });
-    if (it != f.advances.end() && it->cp == cp) {
-      adv12_4 = it->adv12_4;
-      return true;
+    if (it != f.advances.end() && it->cp == cp && it->generation == advanceGeneration_) {
+      if (it->kind == kAdvBaked) {
+        adv12_4 = it->value;
+        return true;
+      }
+      int32_t fin = 0;
+      if (advance12_4FromRaw(f, it->value, fin)) {
+        adv12_4 = static_cast<uint16_t>(fin < 0 ? 0 : fin);
+        return true;
+      }
     }
   }
   // Own cmap: ONE metrics load, no render, no handler call.

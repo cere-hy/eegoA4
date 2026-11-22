@@ -131,6 +131,9 @@ class TtfEpdFont {
   }
   bool getAdvance(uint32_t codepoint, uint8_t style, uint16_t& adv12_4);
 
+  static constexpr uint8_t kAdvRaw = 0;    // AdvanceEntry.value holds font units
+  static constexpr uint8_t kAdvBaked = 1;  // AdvanceEntry.value holds 12.4
+
   // S3cPF6: attach a load-time codepoint->advanceWidth map (shared across all
   // faces/variants of this family). When getAdvance misses its persistent hot
   // table it consults this map BEFORE FreeType, avoiding a per-codepoint SD
@@ -138,8 +141,26 @@ class TtfEpdFont {
   // 12.4 via FtFont's x_scale and inserted through the SAME advanceTableInsert
   // path — AdvanceTable.h / FallbackChain.h are untouched. Set to nullptr (the
   // default) for built-in / PUSH embedded faces, which never read SD.
-  void setFontMap(std::shared_ptr<epd::FontMap> map) { fontMap_ = std::move(map); }
+  // S3cPF8e-8: changing the codepoint->rawAw map invalidates any advance rows
+  // converted under the previous map. Bump generation so stale H hits miss.
+  void setFontMap(std::shared_ptr<epd::FontMap> map) {
+    fontMap_ = std::move(map);
+    ++advanceGeneration_;
+  }
   const epd::FontMap* fontMap() const { return fontMap_.get(); }
+
+  // S3cPF8e-8: hard-invalidate the persistent advance table. Called at every
+  // font-identity / point-size / backing-map change point. clearCache() does
+  // NOT call this — page turns must retain the table (acceptance item 7).
+  void invalidateAdvances() { ++advanceGeneration_; }
+
+#if defined(PF8E7_ADV_TRACE)
+  // S3cPF8e-7 DIAG ONLY: renderer fontId stamped by SdCardFontSystem so the
+  // [ADV] trace can report which font face served each advance. Compiled out of
+  // every functional build (the macro is injected only into the DIAG firmware).
+  void setDiagFontId(int id) { diagFontId_ = id; }
+  int diagFontId() const { return diagFontId_; }
+#endif
 
   // S3c-plus2: PRIMARY-ONLY advance probe for a fallback handler. Returns the
   // builtin/own-face vector advance (ordered table or ONE cmap metrics load),
@@ -225,12 +246,18 @@ class TtfEpdFont {
     freeink::font::PsramVector<EpdGlyph> glyphs;
     freeink::font::PsramVector<uint32_t> cps;
     freeink::font::PsramVector<uint16_t> slot;
-    // S3c final advance-only table: {cp, advanceX(12.4)}, sorted by cp. Kept
-    // separate from the rasterized glyph cache so measuring never allocates a
-    // bitmap. Persists across clearCache()/page turns; bounded by kAdvanceCap.
+    // S3cPF8e-8: value is size-independent rawAw when kind==kAdvRaw (FontMap
+    // source, the shared-face x_scale-mismatch case), read via
+    // advance12_4FromRaw() at THIS variant's current size. F/A sources have no
+    // font-unit advance (builtin/PIF1 are not TTF), so they store an already
+    // aligned 12.4 with kind==kAdvBaked and are served verbatim — a baked 12.4
+    // cannot suffer x_scale mismatch because no multiply happens on read.
+    // generation guards identity changes that don't clear the table.
     struct AdvanceEntry {
       uint32_t cp;
-      uint16_t adv12_4;
+      uint16_t value;       // rawAw if kind==kAdvRaw, else baked 12.4
+      uint16_t generation;
+      uint8_t kind;
     };
     freeink::font::PsramVector<AdvanceEntry> advances;
     // Kern pair cache ((left<<32)|right → 4.4 value), sorted by key. Kerning
@@ -242,6 +269,13 @@ class TtfEpdFont {
     EpdFontData data{};
     EpdFont font{&data};
   };
+
+  // S3cPF8e-8: single conversion口径 for every rawAw source (hot table H and
+  // FontMap M). Declared after Face so the nested type is complete. Aligns the
+  // SHARED FtFont face to THIS variant's size26_6_ FIRST, then reads x_scale.
+  // Non-const: it mutates the shared FtFont's size state via the public
+  // ensureSizeForAdvance() forwarder.
+  bool advance12_4FromRaw(Face& f, uint16_t rawAw, int32_t& adv12_4);
 
   const EpdGlyph* findGlyph(Face& f, uint32_t cp) const;
 
@@ -281,6 +315,10 @@ class TtfEpdFont {
   uint8_t faceLocks_[4] = {0, 0, 0, 0};  // face in use by glyph fault (prevents FT_Face deinit)
   uint32_t size26_6_ = 0;                // exact 26.6 ppem (pt @150DPI), no whole-pixel rounding
   uint16_t pointSize_ = 0;
+  // S3cPF8e-8: bumped on font-identity / size / backing-map changes. Stored in
+  // each AdvanceEntry; a mismatch on lookup means the row belongs to an older
+  // generation and is ignored. Second line of defence behind the table clears.
+  uint16_t advanceGeneration_ = 1;       // never 0, so a zeroed row can't match
   bool loaded_ = false;
   // Set while a glyph fault runs MemoryManager::ensureFree(): the eviction
   // sink calls releaseResidentCaches() on every TTF font, and tearing down
@@ -295,6 +333,9 @@ class TtfEpdFont {
   void* advanceCtx_ = nullptr;
   // S3cPF6 load-time advance map (nullptr = not attached / built-in faces).
   std::shared_ptr<epd::FontMap> fontMap_;
+#if defined(PF8E7_ADV_TRACE)
+  int diagFontId_ = -1;  // DIAG only; see setDiagFontId above.
+#endif
 };
 
 // S3c+ [EHP-PROF] — lightweight cumulative glyph-rasterization profiler. Counts
