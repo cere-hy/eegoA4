@@ -270,11 +270,11 @@ class TtfEpdFont {
     EpdFont font{&data};
   };
 
-  // S3cPF8e-8: single conversion口径 for every rawAw source (hot table H and
-  // FontMap M). Declared after Face so the nested type is complete. Aligns the
-  // SHARED FtFont face to THIS variant's size26_6_ FIRST, then reads x_scale.
-  // Non-const: it mutates the shared FtFont's size state via the public
-  // ensureSizeForAdvance() forwarder.
+  // S3cPF8e-8 / PF9a: single conversion口径 for every rawAw source (hot table H
+  // and FontMap M). Declared after Face so the nested type is complete. Aligns
+  // the SHARED FtFont face to THIS variant's size26_6_ FIRST via the public
+  // lineMetrics26_6(target), then reads x_scale. Non-const: it mutates the
+  // shared FtFont's size state. No submodule patch needed (PF9a self-contained).
   bool advance12_4FromRaw(Face& f, uint16_t rawAw, int32_t& adv12_4);
 
   const EpdGlyph* findGlyph(Face& f, uint32_t cp) const;

@@ -717,13 +717,17 @@ const EpdGlyph* TtfEpdFont::findGlyph(Face& f, const uint32_t cp) const {
   return nullptr;
 }
 
-// S3cPF8e-8: the single conversion口径 for every rawAw source. The FtFont is
-// SHARED across all variants of this family, so its FT_Face may currently be
+// S3cPF8e-8 / PF9a: the single conversion口径 for every rawAw source. The FtFont
+// is SHARED across all variants of this family, so its FT_Face may currently be
 // sized for a sibling variant. Align it to THIS variant's size26_6_ before
-// reading x_scale — otherwise the multiply uses the wrong ppem. ensureSize26_6
-// caches its target, so an unchanged size is a no-op (no FT_Set_Char_Size).
+// reading x_scale — otherwise the multiply uses the wrong ppem.
+// PF9a: use the public lineMetrics26_6(target) instead of a private forwarder —
+// it passes the EXTERNAL target into ensureSize26_6 (not size26_6_ itself), so
+// it truly re-sizes the face when the target differs and is a cached no-op when
+// equal. Keeps the main repo self-contained (no submodule patch required).
 bool TtfEpdFont::advance12_4FromRaw(Face& f, uint16_t rawAw, int32_t& adv12_4) {
-  if (!f.ft->ensureSizeForAdvance(size26_6_)) return false;
+  freeink::font::FtFont::LineMetrics alignSink;
+  if (!f.ft->lineMetrics26_6(size26_6_, alignSink)) return false;
   int32_t adv26 = 0;
   if (!f.ft->unitsToAdvance26_6(rawAw, adv26)) return false;
   adv12_4 = fp4::truncate26_6_to_4(adv26);
