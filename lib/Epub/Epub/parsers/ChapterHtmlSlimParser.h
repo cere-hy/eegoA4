@@ -69,7 +69,9 @@ class ChapterHtmlSlimParser {
   uint32_t diagWsSpaces = 0;    // (1) ordinary whitespace characters seen
   uint32_t diagWsRuns = 0;      // (2) whitespace runs opened
   uint32_t diagWsHit = 0;       // (3) run's left codepoint stashed (lastVisibleCp != 0)
-  uint32_t diagWsMiss = 0;      // (4) ordinary whitespace with no left codepoint (0)
+  uint32_t diagWsMiss = 0;      // (4) ordinary whitespace with no left codepoint (0) [= block + intra]
+  uint32_t diagWsMissBlock = 0; // (4a) miss while atParagraphStart (block/document boundary cleared left)
+  uint32_t diagWsMissIntra = 0; // (4b) miss inside a block that already has a visible codepoint
   uint32_t diagWsResolve = 0;   // (5) resolve funnel fired on a right-hand codepoint
   uint32_t diagWsPreserve = 0;  // (6) whitespace bypassed by effectivePreserveWhitespace
   uint32_t diagWsSemantic = 0;  // (7) semantic spaces (U+00A0 / U+202F / U+3000) kept
@@ -363,6 +365,10 @@ class ChapterHtmlSlimParser {
                        uint32_t& preserve, uint32_t& semantic) const {
     spaces = diagWsSpaces; runs = diagWsRuns; hit = diagWsHit; miss = diagWsMiss;
     resolve = diagWsResolve; preserve = diagWsPreserve; semantic = diagWsSemantic;
+  }
+  // S3cPF8e-2 clause 10: split miss into block-boundary vs intra-block.
+  void diagWsMissSplit(uint32_t& block, uint32_t& intra) const {
+    block = diagWsMissBlock; intra = diagWsMissIntra;
   }
   // Addendum clause 43: inject the expat chunk size so host tests can force a
   // multi-byte codepoint to straddle XML_ParseBuffer() calls. 0 = use the default.

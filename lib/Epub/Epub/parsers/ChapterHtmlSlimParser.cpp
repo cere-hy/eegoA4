@@ -2537,7 +2537,14 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
         if (self->lastVisibleCp != 0) {
           ++self->diagWsHit;
         } else {
-          ++self->diagWsMiss;
+          ++self->diagWsMiss;  // kept for backward compatibility (= block + intra)
+          // S3cPF8e-2 clause 10: split by whether a block/document boundary
+          // cleared the left neighbour. atParagraphStart is true only before
+          // the first visible codepoint of a block (set in startNewTextBlock /
+          // beginParse), so this isolates the boundary-driven misses that
+          // PF8d-2 identified as the real-book dominant case.
+          if (self->atParagraphStart) ++self->diagWsMissBlock;
+          else ++self->diagWsMissIntra;
         }
       }
       // Conservative default until resolve() decides from the right codepoint.
@@ -2961,6 +2968,7 @@ bool ChapterHtmlSlimParser::beginParse() {
   // S3cPF8d: reset per-section whitespace state (addendum clause 41) and all seven
   // diagnostic counters (clause 47).
   diagWsSpaces = diagWsRuns = diagWsHit = diagWsMiss = diagWsResolve = diagWsPreserve = diagWsSemantic = 0;
+  diagWsMissBlock = diagWsMissIntra = 0;  // S3cPF8e-2 clause 10
   diagWsOverride = 0;
   lastVisibleCp = 0;
   pendingSpaceLeftCp = 0;
@@ -3098,8 +3106,9 @@ bool ChapterHtmlSlimParser::finishParse() {
     // S3cPF8d: one [EHP] ws line per section in debug builds. Seven counters per
     // addendum clause 47 (spaces/runs/hit/miss/resolve/preserve/semantic), hand-
     // reconciled in the receipt (no forced conservation). style=1 on, 0 off.
-    LOG_DBG("EHP", "[EHP] ws: spaces=%u runs=%u hit=%u miss=%u resolve=%u preserve=%u semantic=%u style=%u",
-            diagWsSpaces, diagWsRuns, diagWsHit, diagWsMiss, diagWsResolve, diagWsPreserve, diagWsSemantic,
+    LOG_DBG("EHP", "[EHP] ws: spaces=%u runs=%u hit=%u miss=%u missB=%u missI=%u resolve=%u preserve=%u semantic=%u style=%u",
+            diagWsSpaces, diagWsRuns, diagWsHit, diagWsMiss, diagWsMissBlock, diagWsMissIntra,
+            diagWsResolve, diagWsPreserve, diagWsSemantic,
             static_cast<unsigned>(embeddedStyle ? 1 : 0));
     LOG_DBG("EHP", "Time to parse and build pages: %lu ms", millis() - parseStartTime_);
     destroyXmlParser(xmlParser_);
