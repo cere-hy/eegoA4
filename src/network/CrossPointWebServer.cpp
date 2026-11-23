@@ -24,6 +24,8 @@
 #include <base64.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
+#include <esp_netif.h>  // b65-s3c-pf9f: STA IP-presence check (not WiFi.status())
+#include <esp_wifi.h>   // b65-s3c-pf9f: esp_wifi_sta_get_ap_info() failure dump
 #include <fcntl.h>
 #include <lwip/sockets.h>
 #include <unistd.h>
@@ -82,6 +84,29 @@ void onStaDisconnectedForDiagnostics(arduino_event_id_t, arduino_event_info_t in
   const int reason = static_cast<int>(info.wifi_sta_disconnected.reason);
   g_lastStaDisconnectReason = reason ? reason : 1;  // reason 0 crashes name lookup
   g_lastStaDisconnectReasonName = WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(g_lastStaDisconnectReason));
+}
+
+// b65-s3c-pf9f: connectivity is judged by "does the STA have an IP?" rather
+// than by WiFi.status().  On this core, a successful GOT_IP (connectEvent
+// evt=3) can be followed by WiFi.status() reading a stale 6 (WL_DISCONNECTED)
+// for seconds after WifiSelection's scan cache is cleared — the status field
+// lies while the DHCP lease is real.  The authoritative signal is the IP.
+// Prefer the IDF netif view (exact, no Arduino cache); fall back to the
+// Arduino accessor, which itself reads the same netif on this core.
+static bool staHasIp(IPAddress* outIp) {
+  IPAddress ip;  // default-constructed == 0.0.0.0
+  esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  if (sta != nullptr) {
+    esp_netif_ip_info_t info{};
+    if (esp_netif_get_ip_info(sta, &info) == ESP_OK && info.ip.addr != 0) {
+      ip = IPAddress(static_cast<uint32_t>(info.ip.addr));
+    }
+  }
+  if (ip == IPAddress(0, 0, 0, 0)) {
+    ip = WiFi.localIP();
+  }
+  if (outIp != nullptr) *outIp = ip;
+  return ip != IPAddress(0, 0, 0, 0);
 }
 
 // Arduino's WebServer retains parsed request arguments until the next request.
@@ -396,48 +421,41 @@ void CrossPointWebServer::begin() {
     sReasonProbeInstalled = true;
   }
 
-  // Check if we have a valid network connection (either STA connected or AP mode)
+  // Check if we have a valid network connection (either STA has an IP, or AP mode)
   const wifi_mode_t wifiMode = WiFi.getMode();
   const bool staEnabled = (wifiMode & WIFI_MODE_STA) != 0;
-  bool isStaConnected = staEnabled && (WiFi.status() == WL_CONNECTED);
+  IPAddress staIp;
+  bool isStaConnected = staEnabled && staHasIp(&staIp);
 
-  // b65-s3c-pf9e problem A (P0): after a successful GOT_IP (connectEvent evt=3)
-  // the WiFi-transfer entry calls WifiSelectionActivity::onExit(), whose
-  // WiFi.scanDelete() can leave WiFi.status() transiently reading 6
-  // (WL_DISCONNECTED) for ~100 ms even though the STA association is intact.
-  // The old one-shot check read that stale 6 and refused to start the server,
-  // which then triggered the unconditional reboot in onExit(). Poll up to
-  // 3 s at 500 ms, logging every sample, and accept the FIRST WL_CONNECTED.
-  // This is defensive: a genuine "never connected" simply exhausts the window.
+  // b65-s3c-pf9f (P0): the pf9e field run proved WiFi.status() is unusable as
+  // the link signal here — after GOT_IP (evt=3) it reads a stale 6 across a
+  // full 6x500 ms window, and the pf9e reconnect() fallback actually caused a
+  // REAL disconnect (reason=8 ASSOC_LEAVE).  Judge by IP presence instead:
+  // poll up to 3 s (6x500 ms) for a non-zero IP and accept the FIRST one.
+  // No reconnect() — it was the thing that broke a working association.
   if (staEnabled && !isStaConnected) {
-    constexpr int kStatusPolls = 6;            // 6 * 500 ms = 3 s
-    constexpr unsigned long kStatusPollMs = 500;
-    for (int poll = 1; poll <= kStatusPolls && !isStaConnected; ++poll) {
-      delay(kStatusPollMs);
-      const wl_status_t sampled = WiFi.status();
-      LOG_DBG("WEB", "P0 status retry %d/%d: status=%d", poll, kStatusPolls, static_cast<int>(sampled));
-      if (sampled == WL_CONNECTED) {
-        isStaConnected = true;
-        LOG_INF("WEB", "P0 status retry: link recovered at poll %d (status=3)", poll);
-      }
-    }
-    // scanDelete()/stale-cache defence: nudge the driver to refresh status once
-    // more after the window. reconnect() is a no-op when already associated.
-    if (!isStaConnected) {
-      WiFi.reconnect();
-      LOG_DBG("WEB", "P0 status retry: issued WiFi.reconnect() fallback; final status=%d",
-              static_cast<int>(WiFi.status()));
+    constexpr int kIpPolls = 6;               // 6 * 500 ms = 3 s
+    constexpr unsigned long kIpPollMs = 500;
+    for (int poll = 1; poll <= kIpPolls && !isStaConnected; ++poll) {
+      delay(kIpPollMs);
+      isStaConnected = staHasIp(&staIp);
+      LOG_DBG("WEB", "P0 ip poll %d/%d: ip=%s", poll, kIpPolls, staIp.toString().c_str());
     }
   }
 
   const bool isInApMode = (wifiMode & WIFI_MODE_AP) && (WiFi.softAPgetStationNum() >= 0);  // AP is running
 
   if (!isStaConnected && !isInApMode) {
-    // Disconnect reason code is captured by the STA-disconnected event handler
-    // (g_lastStaDisconnectReason / g_lastStaDisconnectReasonName below), so the
-    // next field run can tell "never connected" from "connected then dropped".
-    LOG_DBG("WEB", "Cannot start webserver - no valid network (mode=%d, status=%d, reason=%d %s)", wifiMode,
-            static_cast<int>(WiFi.status()), g_lastStaDisconnectReason, g_lastStaDisconnectReasonName);
+    // Failure triage three-piece: AP-info return code, local IP, and the
+    // disconnect reason captured by the STA-disconnected event handler.
+    // esp_wifi_sta_get_ap_info() != ESP_OK means "never associated";
+    // ESP_OK with a reason means "associated then dropped".
+    wifi_ap_record_t apInfo{};
+    const esp_err_t apInfoRc = esp_wifi_sta_get_ap_info(&apInfo);
+    LOG_DBG("WEB",
+            "Cannot start webserver - no valid network (mode=%d, ap_info_rc=%d, ip=%s, reason=%d %s)",
+            wifiMode, static_cast<int>(apInfoRc), WiFi.localIP().toString().c_str(),
+            g_lastStaDisconnectReason, g_lastStaDisconnectReasonName);
     return;
   }
 

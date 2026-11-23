@@ -14,6 +14,7 @@
 
 #include "BootMode.h"
 #include "WifiTransferMode.h"
+#include <esp_netif.h>      // b65-s3c-pf9f: STA IP-presence pre-begin check
 #include <esp_wifi.h>       // esp_wifi_disconnect/stop/deinit recycle ladder
 
 #include <cstddef>
@@ -50,6 +51,23 @@ static inline unsigned wifiInternalFree() {
 }
 static inline unsigned wifiInternalMax() {
   return static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
+// b65-s3c-pf9f: same STA IP-presence test as CrossPointWebServer::begin(), so
+// the pre-begin guard and the real gate agree (WiFi.status() is not reliable
+// after the scan-cache path on this core). netif view first, Arduino fallback.
+static bool actStaHasIp(IPAddress* outIp) {
+  IPAddress ip;
+  esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  if (sta != nullptr) {
+    esp_netif_ip_info_t info{};
+    if (esp_netif_get_ip_info(sta, &info) == ESP_OK && info.ip.addr != 0) {
+      ip = IPAddress(static_cast<uint32_t>(info.ip.addr));
+    }
+  }
+  if (ip == IPAddress(0, 0, 0, 0)) ip = WiFi.localIP();
+  if (outIp != nullptr) *outIp = ip;
+  return ip != IPAddress(0, 0, 0, 0);
 }
 
 void stopDnsServer() {
@@ -370,22 +388,23 @@ void CrossPointWebServerActivity::startAccessPoint() {
 void CrossPointWebServerActivity::startWebServer() {
   LOG_DBG("WEBACT", "Starting web server...");
 
-  // b65-s3c-pf9e problem A (P0): WifiSelectionActivity::onExit() calls
-  // WiFi.scanDelete() right after GOT_IP; on some core versions the STA status
-  // reads a stale WL_DISCONNECTED(6) for ~100 ms afterwards. Wait up to 3 s
-  // (500 ms steps), logging every sample, before handing off to begin().
-  // begin() carries an identical guard, so this layer is belt-and-braces.
+  // b65-s3c-pf9f (P0): belt-and-braces pre-begin guard, aligned with the real
+  // gate in CrossPointWebServer::begin().  WiFi.status() proved unreliable
+  // after the scan-cache path (stale 6 across the whole window in the field),
+  // so wait up to 3 s (6x500 ms) for a non-zero STA IP and log every sample as
+  // "P0 ip poll i/6: ip=x.x.x.x" — the exact format begin() uses, so field logs
+  // from the two layers can be compared directly.
   if (!isApMode) {
-    constexpr int kPolls = 6;
-    constexpr unsigned long kStepMs = 500;
-    wl_status_t st = WiFi.status();
-    for (int poll = 1; poll <= kPolls && st != WL_CONNECTED; ++poll) {
-      LOG_DBG("WEBACT", "P0 pre-begin status poll %d/%d: status=%d", poll, kPolls, static_cast<int>(st));
-      if (st == WL_CONNECTED) break;
-      delay(kStepMs);
-      st = WiFi.status();
+    constexpr int kIpPolls = 6;
+    constexpr unsigned long kIpPollMs = 500;
+    IPAddress ip;
+    bool haveIp = actStaHasIp(&ip);
+    for (int poll = 1; poll <= kIpPolls && !haveIp; ++poll) {
+      LOG_DBG("WEBACT", "P0 ip poll %d/%d: ip=%s", poll, kIpPolls, ip.toString().c_str());
+      delay(kIpPollMs);
+      haveIp = actStaHasIp(&ip);
     }
-    LOG_DBG("WEBACT", "P0 pre-begin final status=%d (3 = WL_CONNECTED)", static_cast<int>(st));
+    LOG_DBG("WEBACT", "P0 ip poll final ip=%s", ip.toString().c_str());
   }
 
   // Repeat the release right before the allocation: the WiFi selection screen

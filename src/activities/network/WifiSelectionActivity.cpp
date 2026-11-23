@@ -103,6 +103,13 @@ void WifiSelectionActivity::onPromptEvent(const fui::ActionEvent& event, void* u
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
 
+  // b65-s3c-pf9f (P0): clear any stale scan cache on ENTRY, before a fresh
+  // scan starts.  This used to live in onExit() and ran immediately after a
+  // successful GOT_IP on the WiFi-transfer route, where it made WiFi.status()
+  // read a stale WL_DISCONNECTED(6) and fooled the server-start gate.  Moving
+  // it here keeps the "clear old results" semantics but at a safe moment.
+  WiFi.scanDelete();
+
   // b65-s3c-pf9b-4a gate point #2: direct-entry path, before any WiFi/BLE call.
   logPrintf("INF", "WIFI", "[WIFI] gate point=wifiOnEnter free=%u maxalloc=%u(internal)", wifiInternalFree(),
             wifiInternalMax());
@@ -224,10 +231,12 @@ void WifiSelectionActivity::onExit() {
     WiFi.disconnect();
   }
 
-  // Stop any ongoing WiFi scan
-  LOG_DBG("WIFI", "Deleting WiFi scan...");
-  WiFi.scanDelete();
-  LOG_DBG("WIFI", "Free heap after scanDelete: %d bytes", ESP.getFreeHeap());
+  // b65-s3c-pf9f (P0): NO scanDelete() here.  This onExit path runs right
+  // after a successful GOT_IP (connectEvent evt=3) on the WiFi-transfer
+  // route, and clearing the scan cache at that instant left WiFi.status()
+  // reading a stale 6 (WL_DISCONNECTED) — the direct trigger of the
+  // "connected but status=6" failure in the field.  Cache clearing was moved
+  // to onEnter() (before scanning), preserving the semantics at a safe time.
 
   // b65-s3c-pf9c: NO resume here. Leaving this page still leaves WiFi active;
   // the parent Web activity resumes BLE only after its full WiFi recycle.
