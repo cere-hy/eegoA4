@@ -945,11 +945,13 @@ void WifiSelectionActivity::render(RenderLock&&) {
                     cachedMacAddress.c_str());
 
 #if !defined(PF9B_MEMX_DIAG) || !PF9B_MEMX_DIAG
-  // b65-s3c-pf9c: fixed line under the title. A DEAD stop/resume is terminal
-  // and tells the user to reboot; otherwise push is paused until WiFi recycle.
+  // b65-s3c-pf9c-2: the WiFi page always shows the gentle "push paused" line.
+  // A heap-gated DEAD is a passive terminal state (user is transferring a book,
+  // not using push) and recovers on reboot; do NOT show the alarming reboot
+  // hint here. STR_WIFI_PAUSES_PUSH already exists in both locales (no new key).
   UITheme::drawCenteredText(renderer, screen, SMALL_FONT_ID,
                             metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + 2,
-                            bleDead ? tr(STR_PUSH_STOPPED_REBOOT) : tr(STR_WIFI_PAUSES_PUSH), true);
+                            tr(STR_WIFI_PAUSES_PUSH), true);
 #endif
 
   switch (state) {

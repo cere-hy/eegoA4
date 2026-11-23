@@ -54,6 +54,17 @@ NimBLECharacteristic* s_statusChr = nullptr;
 std::atomic<bool> s_statusSubscribed{false};  // B4′: STATUS CCCD subscribed by peer
 // b65-s3c-pf9c: WiFi/BLE state with DEAD as sticky terminal.
 std::atomic<uint8_t> s_wifiBleState{static_cast<uint8_t>(WifiBleState::ACTIVE)};
+
+// b65-s3c-pf9c-2: minimum internal largest-free-block required before resuming
+// BLE. Derived from pf9b-DIAG measured L2 delta: BLE host online maxalloc=7156,
+// after host deinit maxalloc=26612, so the host needs 26612-7156=19456 bytes of
+// contiguous internal RAM. 20% margin -> 23347, rounded to 24000. This is the
+// BLE-restore requirement, NOT the 28000 WiFi-startup threshold (pf9b-4a).
+constexpr size_t kResumeMinMaxAlloc = 24000;
+// Application-layer teardown (Web/WS server, SD font cache) may return its
+// heap a few ms after esp_wifi_deinit(); one bounded retry avoids pushing a
+// recoverable session into the sticky DEAD state on an early snapshot.
+constexpr uint32_t kResumeHeapRetryDelayMs = 30;
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
 std::atomic<bool> s_memxStopped{false};  // phase-1 one-way ladder latch
 #endif
@@ -385,6 +396,23 @@ bool resumeForWifi() {
   }
   if (st0 == static_cast<uint8_t>(WifiBleState::ACTIVE)) return true;   // idempotent
   if (st0 == static_cast<uint8_t>(WifiBleState::RESUMING)) return false; // no overlap
+
+  // b65-s3c-pf9c-2: gate on the internal largest contiguous block. MALLOC_CAP_INTERNAL
+  // excludes PSRAM, which cannot back the BLE host. One bounded retry absorbs the
+  // application-layer heap release lag; only a sustained shortfall is terminal.
+  size_t maxAlloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  if (maxAlloc < kResumeMinMaxAlloc) {
+    delay(kResumeHeapRetryDelayMs);
+    maxAlloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  }
+  if (maxAlloc < kResumeMinMaxAlloc) {
+    logPrintf("WRN", "WFBLE", "[WFBLE] resume skipped: internal maxalloc %u < %u -> DEAD",
+              static_cast<unsigned>(maxAlloc), static_cast<unsigned>(kResumeMinMaxAlloc));
+    s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::DEAD), std::memory_order_release);
+    return false;
+  }
+  logPrintf("INF", "WFBLE", "[WFBLE] resume heap gate OK: internal maxalloc=%u >= %u",
+            static_cast<unsigned>(maxAlloc), static_cast<unsigned>(kResumeMinMaxAlloc));
 
   s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::RESUMING), std::memory_order_release);
   const uint32_t t0 = static_cast<uint32_t>(millis());
