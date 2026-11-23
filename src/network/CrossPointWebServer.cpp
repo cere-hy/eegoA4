@@ -100,12 +100,25 @@ static bool staHasIp(IPAddress* outIp) {
   // macro — using one would fail to compile.  Verified against the bundled
   // esp_netif_defaults.h, which hardcodes the same literal at .if_key.
   esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  esp_err_t netifIpRc = ESP_ERR_INVALID_STATE;  // "no handle" sentinel
+  IPAddress netifIp;
   if (sta != nullptr) {
     esp_netif_ip_info_t info{};
-    if (esp_netif_get_ip_info(sta, &info) == ESP_OK && info.ip.addr != 0) {
-      ip = IPAddress(static_cast<uint32_t>(info.ip.addr));
+    netifIpRc = esp_netif_get_ip_info(sta, &info);
+    if (netifIpRc == ESP_OK && info.ip.addr != 0) {
+      netifIp = IPAddress(static_cast<uint32_t>(info.ip.addr));
+      ip = netifIp;
     }
   }
+  // b65-s3c-pf9h (P0, observation): full five-tuple per sample so a NULL
+  // netif handle can be distinguished from a real "no IP".  Previously only
+  // the final chosen IP was printed, hiding which field was responsible.
+  wifi_ap_record_t apInfo{};
+  const esp_err_t apRc = esp_wifi_sta_get_ap_info(&apInfo);
+  LOG_DBG("WEB",
+          "staHasIp ifkey=%s netif_ip_rc=%d netif_ip=%s localIP=%s ap_info_rc=%d status=%d",
+          sta != nullptr ? "OK" : "NULL", static_cast<int>(netifIpRc), netifIp.toString().c_str(),
+          WiFi.localIP().toString().c_str(), static_cast<int>(apRc), static_cast<int>(WiFi.status()));
   if (ip == IPAddress(0, 0, 0, 0)) {
     ip = WiFi.localIP();
   }

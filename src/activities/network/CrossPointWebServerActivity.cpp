@@ -14,6 +14,7 @@
 
 #include "BootMode.h"
 #include "WifiTransferMode.h"
+#include "network/WifiIpProbe.h"  // b65-s3c-pf9h: millisecond-slice IP probe
 #include <esp_netif.h>      // b65-s3c-pf9f: STA IP-presence pre-begin check
 #include <esp_wifi.h>       // esp_wifi_disconnect/stop/deinit recycle ladder
 
@@ -80,10 +81,18 @@ void stopDnsServer() {
 }
 
 void restartMdns(const char* hostname, const char* tag) {
+  // b65-s3c-pf9h: ESPmDNS 3.x internally calls esp_netif_* to bind the service
+  // to an interface address.  Bracket MDNS.begin() to see whether THIS call is
+  // where a previously-present IP disappears.  Observation only — no behaviour
+  // change inside MDNS itself.
+  wifi_ip_probe::emit("web_before_mdns_end");
   MDNS.end();
+  wifi_ip_probe::emit("web_before_mdns_begin");
   if (MDNS.begin(hostname)) {
+    wifi_ip_probe::emit("web_after_mdns_begin_ok");
     LOG_DBG(tag, "mDNS started: http://%s.local/", hostname);
   } else {
+    wifi_ip_probe::emit("web_after_mdns_begin_fail");
     LOG_DBG(tag, "WARNING: mDNS failed to start");
   }
 }
@@ -307,14 +316,22 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
 }
 
 void CrossPointWebServerActivity::onWifiSelectionComplete(const bool connected) {
+  // b65-s3c-pf9h: bracket the completion callback — the first slice after
+  // WifiSelectionActivity::onExit() in the 12 ms window.
+  wifi_ip_probe::emit("web_cb_enter");
   LOG_DBG("WEBACT", "WifiSelectionActivity completed, connected=%d", connected);
 
   if (connected) {
     // Get connection info before exiting subactivity
     isApMode = false;
 
-    // Start mDNS for hostname resolution
-    restartMdns(AP_HOSTNAME, "WEBACT");
+    // b65-s3c-pf9h (P1, semantics + likely workaround): mDNS used to start
+    // HERE, unconditionally, before any IP check — on the pf9g field run
+    // "mDNS started" printed while localIP() was already 0.0.0.0.  ESPmDNS 3.x
+    // binds to a netif address, so starting it pre-IP is wrong (and a suspect
+    // in the 12 ms loss window).  The STA mDNS start is now deferred into
+    // startWebServer(), AFTER its IP poll confirms a non-zero address.
+    wifi_ip_probe::emit("web_cb_ip_defer_mdns");
 
     // Start the web server
     startWebServer();
@@ -406,6 +423,18 @@ void CrossPointWebServerActivity::startWebServer() {
       haveIp = actStaHasIp(&ip);
     }
     LOG_DBG("WEBACT", "P0 ip poll final ip=%s", ip.toString().c_str());
+
+    // b65-s3c-pf9h (P1, semantics + likely workaround): start the STA mDNS
+    // only AFTER the IP poll confirms a non-zero address.  This is the slice's
+    // last boundary before webServer->begin(); bracketing MDNS.begin() inside
+    // restartMdns() shows whether the call itself drops the IP.
+    wifi_ip_probe::emit("web_before_mdns_gate");
+    if (haveIp) {
+      restartMdns(AP_HOSTNAME, "WEBACT");
+    } else {
+      LOG_DBG("WEBACT", "pf9h: IP poll found no address, skip mDNS (server gate will triage)");
+      wifi_ip_probe::emit("web_mdns_skipped_no_ip");
+    }
   }
 
   // Repeat the release right before the allocation: the WiFi selection screen

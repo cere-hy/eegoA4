@@ -19,6 +19,7 @@
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/WifiIpProbe.h"  // b65-s3c-pf9h: millisecond-slice IP probe
 #include "util/PluginEvents.h"
 
 namespace fui = freeink::ui;
@@ -226,12 +227,24 @@ void WifiSelectionActivity::onExit() {
   Activity::onExit();
 
   LOG_DBG("WIFI", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
+  // b65-s3c-pf9h (P0): slice the ~12 ms window.  state is still CONNECTING on
+  // a saved/open successful join (checkConnectionStatus() clears only
+  // autoConnecting, never state), so the guard below fires WiFi.disconnect()
+  // right after GOT_IP.  Bracket it to see if THIS is where the IP is dropped.
+  wifi_ip_probe::emit("ws_onexit_start");
 
   // b65-s3c-pf9b-2: mid-exit while a connection is in flight — cancel it and
   // restore BLE. Parent still owns the established-connection state, so we only
   // abort an in-progress attempt (not a successful join).
+  // b65-s3c-pf9h: NOTE — on the successful saved/open path `state` is left as
+  // CONNECTING, so this guard is entered even though the join succeeded. That
+  // makes WiFi.disconnect() a prime suspect for the vanishing IP; the probe
+  // before/after confirms it.  Behaviour is intentionally UNCHANGED this batch
+  // (observation only) — the fix is deferred to pf9i after the slice.
   if (state == WifiSelectionState::CONNECTING || state == WifiSelectionState::AUTO_CONNECTING) {
+    wifi_ip_probe::emit("ws_before_disconnect");
     WiFi.disconnect();
+    wifi_ip_probe::emit("ws_after_disconnect");
   }
 
   // b65-s3c-pf9f (P0): NO scanDelete() here.  This onExit path runs right
@@ -245,6 +258,7 @@ void WifiSelectionActivity::onExit() {
   // the parent Web activity resumes BLE only after its full WiFi recycle.
 
   LOG_DBG("WIFI", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
+  wifi_ip_probe::emit("ws_onexit_end");
 }
 
 void WifiSelectionActivity::startWifiScan(const bool autoScan) {
@@ -602,8 +616,44 @@ void WifiSelectionActivity::checkConnectionStatus() {
 #endif
 
   if (status == WL_CONNECTED) {
-    // Successfully connected
+    // b65-s3c-pf9h (P0, observation + judgement): WL_CONNECTED (evt=3) proves
+    // GOT_IP fired, but the pf9g field run showed the IP can be 0.0.0.0 by the
+    // time the parent starts the web server.  Gate success on a NON-ZERO
+    // localIP() rather than status alone: if GOT_IP has not actually left an
+    // address on the netif, hold this page on "getting IP" and re-check next
+    // loop instead of completing immediately.  Every sample is logged so the
+    // IP trail across the transition is visible.
     IPAddress ip = WiFi.localIP();
+    {
+      char ipStr[16];
+      snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+      logPrintf("INF", "WIFI", "[WIFI] pf9h ip-trail status=%d localIP=%s", static_cast<int>(status), ipStr);
+    }
+    wifi_ip_probe::emit("ws_gotip_check");
+
+    if (ip == IPAddress(0, 0, 0, 0)) {
+      // GOT_IP asserted (status==3) but no usable address yet.  Do NOT pop;
+      // wait up to IP_WAIT_TIMEOUT_MS, showing "Getting IP address...".
+      if (!waitingForIp) {
+        waitingForIp = true;
+        ipWaitStartTime = millis();
+      }
+      if (millis() - ipWaitStartTime > IP_WAIT_TIMEOUT_MS) {
+        waitingForIp = false;
+        WiFi.disconnect();
+        connectionError = tr(STR_ERROR_CONNECTION_TIMEOUT);
+        if (autoConnecting) {
+          handleAutoConnectFailure();
+          return;
+        }
+        state = WifiSelectionState::CONNECTION_FAILED;
+        requestUpdate();
+      }
+      return;
+    }
+    waitingForIp = false;
+
+    // Successfully connected (status==WL_CONNECTED AND a real IP is present)
     char ipStr[16];
     snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
     connectedIP = ipStr;
@@ -644,6 +694,11 @@ void WifiSelectionActivity::checkConnectionStatus() {
     // drain the plugin outboxes here (web server up and sleep entry are the
     // other such moments). Cheap no-op when nothing is queued.
     pluginevents::drain(&renderer);
+
+    // b65-s3c-pf9h: last in-page sample before the activity pops.  If the IP
+    // is still present here but gone at ws_onexit_*, the loss is inside
+    // onExit()/the completion callback/MDNS.begin().
+    wifi_ip_probe::emit("ws_before_complete");
 
     // If we entered a new password, ask if user wants to save it
     // Otherwise, immediately complete so parent can start web server
@@ -1168,7 +1223,10 @@ void WifiSelectionActivity::renderConnecting(const Rect* screen, const ThemeMetr
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     }
   } else {
-    const char* statusText = autoConnecting ? tr(STR_CONNECTING_SAVED_WIFI) : tr(STR_CONNECTING);
+    // b65-s3c-pf9h: GOT_IP asserted but no usable address yet — hold the page
+    // (no pop) and tell the user we are waiting for the IP.
+    const char* statusText = waitingForIp ? tr(STR_WAITING_FOR_IP)
+                             : (autoConnecting ? tr(STR_CONNECTING_SAVED_WIFI) : tr(STR_CONNECTING));
     const Rect statusBounds{statusX, screen->y, statusWidth, top - metrics->verticalSpacing - screen->y};
     UITheme::drawCenteredWrappedText(renderer, statusBounds, UI_12_FONT_ID, statusText, MAX_STATUS_LINES, true,
                                      EpdFontFamily::BOLD, UITheme::TextVerticalAlignment::BOTTOM);

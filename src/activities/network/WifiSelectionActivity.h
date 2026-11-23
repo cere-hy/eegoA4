@@ -115,6 +115,14 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   static constexpr unsigned long AUTO_CONNECTION_TIMEOUT_MS = 7000;
   unsigned long connectionStartTime = 0;
 
+  // b65-s3c-pf9h (P0, observation + judgement): WL_CONNECTED (evt=3) proves
+  // GOT_IP fired, but the IP can be gone by the time the parent starts the web
+  // server. Gate success on a non-zero localIP() instead of status alone, and
+  // hold the page on "getting IP" (15 s sub-window) while logging the IP trail.
+  bool waitingForIp = false;
+  unsigned long ipWaitStartTime = 0;
+  static constexpr unsigned long IP_WAIT_TIMEOUT_MS = 15000;
+
   // The UiAppHost app hosts the network list and the save/forget prompts
   // (themed rows and dialogs, touch routing); every other state keeps its
   // legacy centered-text rendering.

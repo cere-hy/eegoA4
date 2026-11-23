@@ -620,6 +620,46 @@ void setup() {
 
   HalSystem::begin();
 
+  // b65-s3c-pf9h (P0, observation): register the FULL WiFi event stream at the
+  // earliest safe point — before any WiFi.mode()/begin() and long before
+  // CrossPointWebServer::begin() (which used to be the ONLY place a disconnect
+  // listener existed, ~6 s too late to see the pf9g field gap).  Print every
+  // STA/GOT_IP/LOST_IP/DISCONNECTED event with its Arduino event id and name.
+  // Field name is `arduino_evt=<id> <name>` — deliberately NOT `evt=`, because
+  // `connectEvent evt=%d` in WifiSelectionActivity is WiFi.status() (wl_status_t,
+  // where 3 == WL_CONNECTED == GOT_IP), a different enum.  reason is included
+  // for DISCONNECTED (0 means no real reason was reported).
+  {
+    static const auto pf9hWifiEvent = [](arduino_event_id_t id, arduino_event_info_t info) {
+      const char* name = "?";
+      switch (id) {
+        case ARDUINO_EVENT_WIFI_OFF: name = "WIFI_OFF"; break;
+        case ARDUINO_EVENT_WIFI_READY: name = "WIFI_READY"; break;
+        case ARDUINO_EVENT_WIFI_SCAN_DONE: name = "SCAN_DONE"; break;
+        case ARDUINO_EVENT_WIFI_STA_START: name = "STA_START"; break;
+        case ARDUINO_EVENT_WIFI_STA_STOP: name = "STA_STOP"; break;
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED: name = "STA_CONNECTED"; break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: name = "STA_DISCONNECTED"; break;
+        case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: name = "STA_AUTHMODE_CHANGE"; break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP: name = "STA_GOT_IP"; break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP6: name = "STA_GOT_IP6"; break;
+        case ARDUINO_EVENT_WIFI_STA_LOST_IP: name = "STA_LOST_IP"; break;
+        case ARDUINO_EVENT_WIFI_AP_START: name = "AP_START"; break;
+        case ARDUINO_EVENT_WIFI_AP_STOP: name = "AP_STOP"; break;
+        default: break;
+      }
+      if (id == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+        const int reason = static_cast<int>(info.wifi_sta_disconnected.reason);
+        logPrintf("INF", "WIFI", "[WIFI] arduino_evt=%d %s reason=%d localIP=%s",
+                  static_cast<int>(id), name, reason, WiFi.localIP().toString().c_str());
+      } else {
+        logPrintf("INF", "WIFI", "[WIFI] arduino_evt=%d %s localIP=%s",
+                  static_cast<int>(id), name, WiFi.localIP().toString().c_str());
+      }
+    };
+    WiFi.onEvent(pf9hWifiEvent);  // no event filter = subscribe to all events
+  }
+
   // b65-s3c-pf9d: consume the one-shot boot mode BEFORE any BLE/font setup.
   // A WIFI request is written immediately before esp_restart(); consuming here
   // resets NVS to NORMAL so a later power cut can never re-enter this mode.
