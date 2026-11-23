@@ -28,6 +28,7 @@
 #include <XteinkDetect.h>
 #include <builtinFonts/all.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <esp_wifi.h>
 #include <time.h>
 
@@ -35,6 +36,7 @@
 #include <cstdarg>
 #include <cstring>
 
+#include "BootMode.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "KOReaderCredentialStore.h"
@@ -45,6 +47,7 @@
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "WifiCredentialStore.h"
+#include "WifiTransferMode.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
@@ -481,8 +484,10 @@ void enterDeepSleep(bool fromTimeout = false) {
   trustedtime::note();
 
   // Stop Bluetooth before plugin delivery can start WiFi; a timeout defers delivery.
+  // b65-s3c-pf9d: WiFi-transfer mode never started BLE, so there is nothing to
+  // stop — skip the BLE API entirely (dual-judgment gate).
   deepSleepInProgress = true;
-  const bool bluetoothStopped = bleturner::beforeSleep(2000);
+  const bool bluetoothStopped = WIFI_TRANSFER_ACTIVE() ? true : bleturner::beforeSleep(2000);
   if (!bluetoothStopped) LOG_ERR("SLP", "Bluetooth did not stop; deferring sleep-event delivery");
   deliverSleepPluginEvents(bluetoothStopped);
 
@@ -614,6 +619,28 @@ void setup() {
 #endif
 
   HalSystem::begin();
+
+  // b65-s3c-pf9d: consume the one-shot boot mode BEFORE any BLE/font setup.
+  // A WIFI request is written immediately before esp_restart(); consuming here
+  // resets NVS to NORMAL so a later power cut can never re-enter this mode.
+  const bootmode::Mode bootMode = bootmode::consume();
+  const esp_reset_reason_t bootResetReason = esp_reset_reason();
+  if (bootMode == bootmode::Mode::WIFI) {
+    if (wifitransfer::compiledEnabled() && bootResetReason == ESP_RST_SW) {
+      // Normal entry: the Home entry wrote WIFI then called esp_restart().
+      wifitransfer::activate();
+      LOG_INF("MAIN", "WiFi-transfer boot (SW restart, boot_mode=WIFI)");
+    } else {
+      // Clause 11: a WIFI flag reached on a non-SW restart (power cut before or
+      // during entry), or a build compiled without the feature. consume() has
+      // already reset NVS to NORMAL; flag the one-shot Home hint and continue
+      // with an ordinary boot.
+      wifitransfer::markAbnormalExit();
+      LOG_INF("MAIN", "stale WIFI boot_mode on reset_reason=%d; staying NORMAL",
+              static_cast<int>(bootResetReason));
+    }
+  }
+
   // checkPanic() clears the watchdog capture marker after a successful SD
   // dump, so retain the boot classification for the later activity route.
   const bool rebootedFromPanic = HalSystem::isRebootFromPanic();
@@ -724,19 +751,24 @@ void setup() {
   // Restore the monotonic clock floor before anything reads time() (event
   // timestamps, loan-expiry checks).
   trustedtime::init();
-  // B3: bring up the system-level PicoPush GATT peripheral from boot so a phone
-  // can find "PicoPush-XXXX" on the library home without opening any page.
-  // Advertising/link state only ever reaches the UI as ordinary frame content
-  // (g_bleConnected is read at the next normal render) — never a repaint here.
-  blepushgatt::begin();
-  // B6.5 S2: bridge PushTextCore onto the push CTRL/DATA hooks. Registers the
-  // sink handler for 0x01–0x05; a BEGIN yields READY — the APK's wait signal.
-  // 0x07/0x08 keep their dedicated AI hooks (set below), untouched.
-  pushtextsink::init();
-  // B5: arm the 0x07 AI-definition receive hook (double-slot ring + main-loop
-  // pump). Persistent like B3 advertising, independent of any reader page.
-  aireceivesink::init();
-  bleturner::begin(pageturner::host, SETTINGS.ble);
+  // b65-s3c-pf9d: WiFi-transfer mode must not touch ANY BLE API (including
+  // isInitialized probes). All four BLE subsystems are gated by the single
+  // dual-judgment helper; no BLE symbol is reached in WiFi mode.
+  if (!WIFI_TRANSFER_ACTIVE()) {
+    // B3: bring up the system-level PicoPush GATT peripheral from boot so a phone
+    // can find "PicoPush-XXXX" on the library home without opening any page.
+    // Advertising/link state only ever reaches the UI as ordinary frame content
+    // (g_bleConnected is read at the next normal render) — never a repaint here.
+    blepushgatt::begin();
+    // B6.5 S2: bridge PushTextCore onto the push CTRL/DATA hooks. Registers the
+    // sink handler for 0x01–0x05; a BEGIN yields READY — the APK's wait signal.
+    // 0x07/0x08 keep their dedicated AI hooks (set below), untouched.
+    pushtextsink::init();
+    // B5: arm the 0x07 AI-definition receive hook (double-slot ring + main-loop
+    // pump). Persistent like B3 advertising, independent of any reader page.
+    aireceivesink::init();
+    bleturner::begin(pageturner::host, SETTINGS.ble);
+  }
 
   switch (wakeupReason) {
     case HalGPIO::WakeupReason::PowerButton:
@@ -839,7 +871,14 @@ void setup() {
   // Output polarity is resolved per render by ActivityManager (night mode
   // inverts only the reading surfaces), so nothing to restore here.
 
-  if (recoveryFirmwareMode) {
+  if (WIFI_TRANSFER_ACTIVE()) {
+    // b65-s3c-pf9d: one-shot WiFi-transfer boot — route straight into the web
+    // server activity (Join Network, skipping mode selection and any second
+    // defrag reboot via startInJoinNetwork=true). BLE was never initialized.
+    // The SD/font setup above still ran so the WebServer UI can render.
+    LOG_INF("MAIN", "WiFi-transfer boot: entering CrossPointWebServer directly");
+    activityManager.goToJoinNetwork();
+  } else if (recoveryFirmwareMode) {
     // Skip normal home/reader routing: jump straight into the SD firmware picker.
     activityManager.replaceActivity(
         std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInputManager, /*recoveryMode=*/true));
@@ -904,47 +943,55 @@ void loop() {
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   mappedInputManager.update();
 
-  // B3 push peripheral housekeeping: re-arm advertising after a link drops and
-  // clear stale receive flags. No display work — the status icon rides the next
-  // normal full-frame render via g_bleConnected.
-  blepushgatt::loop();
+  // b65-s3c-pf9d: in WiFi-transfer mode NO BLE API may be reached, including
+  // the loop-side housekeeping/pumps and the page-turner tick. All are gated by
+  // the same dual-judgment helper; remoteActed stays false so idle/sleep logic
+  // is unaffected.
+  bool remoteActed = false;
+  if (!WIFI_TRANSFER_ACTIVE()) {
+    // B3 push peripheral housekeeping: re-arm advertising after a link drops and
+    // clear stale receive flags. No display work — the status icon rides the next
+    // normal full-frame render via g_bleConnected.
+    blepushgatt::loop();
+    // B5: consume the latest 0x07 definition frame (decode + append/reflow +
+    // hex留证). Cheap no-op when no frame pending; never blocks the loop.
+    aireceivesink::pump();
+
+    // S3b P3: a completed push raises a one-shot flag on the NimBLE host task.
+    // Decide auto-open HERE on the loop task (never from the host task). Policies:
+    //  - reading PUSH  -> reopen via goToReader (fresh Activity, page 1, full refresh)
+    //  - reading another book -> do NOT switch or interrupt (corner hint is S4)
+    //  - home / elsewhere -> auto-open PUSH
+    if (pushtextsink::takePushCompleted()) {
+      const bool readingPush = activityManager.isForegroundPushReader();
+      const bool readingOther = activityManager.isForegroundReader() && !readingPush;
+      if (readingOther) {
+        LOG_INF("PUSH", "completed while reading another book; staying put");
+      } else {
+        LOG_INF("PUSH", "completed; auto-opening PUSH (readingPush=%d)", readingPush ? 1 : 0);
+        activityManager.goToReader("/PUSH.txt");
+      }
+    }
+
+    // Bluetooth page turner, before the USB drive's early return: a card handed to USB stops the radio
+    // before anything else.
+    bleturner::Scene scene{};
+    // Home counts only for builds whose radio may start there (the S3 profile, RadioPolicy.h).
+    const bool homeShown = activityManager.isForegroundHomeShown();
+    const bool remoteContext = activityManager.isRemoteReaderContext();
+    scene.where = remoteContext ? bleturner::Where::Reader
+                  : homeShown   ? bleturner::Where::Home
+                                : bleturner::Where::Elsewhere;
+    scene.visit = activityManager.visit();
+    scene.pageShown = homeShown || remoteContext;
+    scene.storageBusy = activityManager.requiresExclusiveStorageLoop();
+    scene.wifiOn = WiFi.getMode() != WIFI_MODE_NULL;
+    remoteActed = bleturner::tick(scene);
+  }
   // diag-pace: emit the remaining 0x1A burst frames, >=40 ms apart. One frame
   // per iteration at most, instant no-op between deadlines — never blocks UI.
+  // Not BLE — keep outside the gate (scene push is a local renderer).
   scenepush::loop();
-  // B5: consume the latest 0x07 definition frame (decode + append/reflow +
-  // hex留证). Cheap no-op when no frame pending; never blocks the loop.
-  aireceivesink::pump();
-
-  // S3b P3: a completed push raises a one-shot flag on the NimBLE host task.
-  // Decide auto-open HERE on the loop task (never from the host task). Policies:
-  //  - reading PUSH  -> reopen via goToReader (fresh Activity, page 1, full refresh)
-  //  - reading another book -> do NOT switch or interrupt (corner hint is S4)
-  //  - home / elsewhere -> auto-open PUSH
-  if (pushtextsink::takePushCompleted()) {
-    const bool readingPush = activityManager.isForegroundPushReader();
-    const bool readingOther = activityManager.isForegroundReader() && !readingPush;
-    if (readingOther) {
-      LOG_INF("PUSH", "completed while reading another book; staying put");
-    } else {
-      LOG_INF("PUSH", "completed; auto-opening PUSH (readingPush=%d)", readingPush ? 1 : 0);
-      activityManager.goToReader("/PUSH.txt");
-    }
-  }
-
-  // Bluetooth page turner, before the USB drive's early return: a card handed to USB stops the radio
-  // before anything else.
-  bleturner::Scene scene{};
-  // Home counts only for builds whose radio may start there (the S3 profile, RadioPolicy.h).
-  const bool homeShown = activityManager.isForegroundHomeShown();
-  const bool remoteContext = activityManager.isRemoteReaderContext();
-  scene.where = remoteContext ? bleturner::Where::Reader
-                : homeShown   ? bleturner::Where::Home
-                              : bleturner::Where::Elsewhere;
-  scene.visit = activityManager.visit();
-  scene.pageShown = homeShown || remoteContext;
-  scene.storageBusy = activityManager.requiresExclusiveStorageLoop();
-  scene.wifiOn = WiFi.getMode() != WIFI_MODE_NULL;
-  const bool remoteActed = bleturner::tick(scene);
 
   if (activityManager.requiresExclusiveStorageLoop()) {
     // USB Drive handed the raw SD card to the host. Do not run screenshots,

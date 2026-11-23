@@ -28,6 +28,7 @@ class HomeActivity final : public Activity {
   }
   bool hasContinueReading = false;
   bool pushNoticePending = false;  // S3: show "No push content" popup once on next render
+  bool wifiAbnormalNoticePending = false;  // pf9d: stale WIFI boot_mode hint, shown once on next render
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
   uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
@@ -60,7 +61,9 @@ class HomeActivity final : public Activity {
     ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
     ++i;
-    if (item == HomeMenuItem::PUSH) return i;  // S3: last menu row, after Settings
+    if (item == HomeMenuItem::PUSH) return i;  // S3: after Settings
+    ++i;
+    if (item == HomeMenuItem::WIFI_TRANSFER) return i;  // pf9d: last menu row
     return 0;
   }
 
@@ -72,7 +75,8 @@ class HomeActivity final : public Activity {
     if (slot != HomeMenuItem::NONE && idx == i++) return slot;
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i++) return HomeMenuItem::SETTINGS_MENU;
-    if (idx == i) return HomeMenuItem::PUSH;  // S3: last menu row
+    if (idx == i++) return HomeMenuItem::PUSH;  // S3: after Settings
+    if (idx == i) return HomeMenuItem::WIFI_TRANSFER;  // pf9d: last menu row
     return HomeMenuItem::NONE;
   }
   void onRecentBookSelected(const std::string& path);
@@ -83,6 +87,7 @@ class HomeActivity final : public Activity {
   void onOpdsBrowserOpen();
   void onPluginsOpen();
   void onPushOpen();
+  void onWifiTransferOpen();
 
   int getMenuItemCount() const;
   bool storeCoverBuffer();    // Store frame buffer for cover image

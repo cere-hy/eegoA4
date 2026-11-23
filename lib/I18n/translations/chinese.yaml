@@ -659,3 +659,7 @@ STR_POWER_DOUBLE_CLICK: "双击"
 STR_CSS_LOW_MEMORY: "内嵌样式未加载（内存不足）"
 STR_CSS_FILE_TOO_LARGE: "内嵌样式未加载（文件过大）"
 STR_CSS_PARSE_FAILED: "内嵌样式未加载（解析失败）"
+
+STR_MODE_WIFI_TITLE: "WiFi 传书模式"
+STR_MODE_WIFI_HINT: "推送暂停；完成后设备将自动重启"
+STR_WIFI_ABNORMAL_EXIT: "上次 WiFi 传书未正常退出"

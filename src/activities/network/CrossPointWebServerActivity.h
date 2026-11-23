@@ -56,6 +56,11 @@ class CrossPointWebServerActivity final : public Activity {
   unsigned long firstDisconnectAt = 0;
   static constexpr unsigned long WIFI_ABANDON_MS = 5UL * 60UL * 1000UL;
 
+  // b65-s3c-pf9d clause 11: auto-return to NORMAL after an idle WiFi-transfer
+  // session. The timer starts when the web server comes up.
+  unsigned long wifiSessionStartedAt = 0;
+  static constexpr unsigned long WIFI_IDLE_RESTART_MS = 10UL * 60UL * 1000UL;
+
   // Cached signal-strength bracket (0..4) for the WiFi indicator.
   int lastWifiBars = 0;
 

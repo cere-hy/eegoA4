@@ -17,17 +17,21 @@
 #include <cstring>
 #include <vector>
 
+#include "BootMode.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "HapticFeedback.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "WifiTransferMode.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
+#include <esp_system.h>
+
 int HomeActivity::getMenuItemCount() const {
-  int count = 5;  // File Browser, Library, File transfer, Settings, PUSH (S3)
+  int count = 6;  // File Browser, Library, File transfer, Settings, PUSH, WiFi Transfer (pf9d)
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -267,6 +271,14 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 void HomeActivity::onEnter() {
   Activity::onEnter();
 
+  // b65-s3c-pf9d clause 11: show the "last WiFi session did not exit cleanly"
+  // hint exactly once on the first Home render after a stale WIFI boot_mode.
+  if (WIFI_TRANSFER_ACTIVE()) {
+    wifitransfer::consumeAbnormalExit();  // discard any latch; we are in WiFi mode
+  } else if (wifitransfer::consumeAbnormalExit()) {
+    wifiAbnormalNoticePending = true;
+  }
+
   hasOpdsServers = OPDS_STORE.hasServers();
   // Plugin System is the global opt-in. Once enabled, expose the Plugins entry
   // even when no SD plugins are installed yet so Plugin Hub can be installed
@@ -385,6 +397,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuItem::PUSH:
         onPushOpen();
+        break;
+      case HomeMenuItem::WIFI_TRANSFER:
+        onWifiTransferOpen();
         break;
       default:
         break;
@@ -597,8 +612,8 @@ void HomeActivity::render(RenderLock&&) {
 
   // Build menu items dynamically
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE), tr(STR_PUSH)};
-  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings, Push};
+                                        tr(STR_SETTINGS_TITLE), tr(STR_PUSH), tr(STR_MODE_WIFI_TITLE)};
+  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings, Push, Wifi};
 
   if (slotItem() != HomeMenuItem::NONE) {
     menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
@@ -628,6 +643,9 @@ void HomeActivity::render(RenderLock&&) {
   if (pushNoticePending) {
     GUI.drawPopup(renderer, tr(STR_NO_PUSH_CONTENT));
     pushNoticePending = false;
+  } else if (wifiAbnormalNoticePending) {
+    GUI.drawPopup(renderer, tr(STR_WIFI_ABNORMAL_EXIT));
+    wifiAbnormalNoticePending = false;
   }
 
   renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
@@ -649,6 +667,18 @@ void HomeActivity::onLibraryOpen() { activityManager.goToLibrary(); }
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
+
+void HomeActivity::onWifiTransferOpen() {
+  // b65-s3c-pf9d clause 9: entering WiFi-transfer mode is a one-shot boot.
+  // Reading progress was already flushed by EpubReaderActivity::onExit when we
+  // returned to Home; persist APP_STATE once more so the open-book path is
+  // durable, then arm the NVS flag and restart. esp_restart() yields ESP_RST_SW,
+  // which setup() requires before arming WiFi-transfer mode.
+  APP_STATE.saveToFile();
+  bootmode::set(bootmode::Mode::WIFI);
+  LOG_INF("HOME", "WiFi-transfer flag armed; restarting");
+  esp_restart();
+}
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 

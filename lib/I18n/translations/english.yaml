@@ -667,3 +667,7 @@ STR_POWER_DOUBLE_CLICK: "Double click"
 STR_CSS_LOW_MEMORY: "Embedded styles not loaded (low memory)"
 STR_CSS_FILE_TOO_LARGE: "Embedded styles not loaded (file too large)"
 STR_CSS_PARSE_FAILED: "Embedded styles not loaded (parse failed)"
+
+STR_MODE_WIFI_TITLE: "WiFi Transfer Mode"
+STR_MODE_WIFI_HINT: "Push paused; device will restart when done"
+STR_WIFI_ABNORMAL_EXIT: "Last WiFi transfer did not exit cleanly"

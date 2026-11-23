@@ -10,6 +10,10 @@
 #include <WiFi.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>  // internal-RAM-only gate probes (no PSRAM contamination)
+#include <esp_system.h>
+
+#include "BootMode.h"
+#include "WifiTransferMode.h"
 #include <esp_wifi.h>       // esp_wifi_disconnect/stop/deinit recycle ladder
 
 #include <cstddef>
@@ -126,6 +130,23 @@ void CrossPointWebServerActivity::onEnter() {
 
 void CrossPointWebServerActivity::onExit() {
   Activity::onExit();
+
+  // b65-s3c-pf9d clause 10: in WiFi-transfer mode, "Done" simply resets the
+  // boot flag and reboots. NEVER call esp_wifi_deinit() here — pf9b-4a proved it
+  // corrupts the Arduino WiFi state machine (0x3001 NOT_INIT on the next boot).
+  // A reboot returns to a pristine NORMAL-mode heap with BLE re-initialized by
+  // setup(). This single interception covers every exit path (Back/Home/
+  // upload-exit), so no per-call-site branch is needed.
+  if (WIFI_TRANSFER_ACTIVE()) {
+    // Clause 11 sync: destroy the web server first so any in-flight upload's
+    // HalFile is closed (SdFat close() flushes the FAT entry + data to card)
+    // BEFORE we reboot. Never call esp_wifi_deinit() (pf9b-4a: 0x3001 NOT_INIT).
+    webServer.reset();
+    bootmode::set(bootmode::Mode::NORMAL);
+    LOG_INF("WIFI", "wifi-transfer done: files closed, boot_mode=NORMAL; restarting (no esp_wifi_deinit)");
+    esp_restart();
+    return;  // unreachable
+  }
 
   LOG_DBG("WEBACT", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
 
@@ -375,6 +396,7 @@ void CrossPointWebServerActivity::startWebServer() {
 
   if (webServer->isRunning()) {
     state = WebServerActivityState::SERVER_RUNNING;
+    wifiSessionStartedAt = millis();
     LOG_DBG("WEBACT", "Web server started successfully");
     lastWifiBars = isApMode ? 0 : barsForRssi(WiFi.RSSI(), 0);
 
@@ -397,6 +419,22 @@ void CrossPointWebServerActivity::startWebServer() {
 }
 
 void CrossPointWebServerActivity::loop() {
+  // b65-s3c-pf9d clause 11: an idle WiFi-transfer session auto-returns to
+  // NORMAL after 10 minutes of no physical input. A plain reboot restores a
+  // pristine NORMAL heap; esp_wifi_deinit() is deliberately not called.
+  if (WIFI_TRANSFER_ACTIVE() && state == WebServerActivityState::SERVER_RUNNING && wifiSessionStartedAt != 0) {
+    if (gpio.rawInputActive()) {
+      wifiSessionStartedAt = millis();  // user is present — restart the idle clock
+    }
+    if ((millis() - wifiSessionStartedAt) >= WIFI_IDLE_RESTART_MS) {
+      webServer.reset();  // flush/close any in-flight file before reboot
+      LOG_INF("WIFI", "wifi-transfer idle 10 min: boot_mode=NORMAL; restarting");
+      bootmode::set(bootmode::Mode::NORMAL);
+      esp_restart();
+      return;
+    }
+  }
+
   // Handle different states
   if (state == WebServerActivityState::SERVER_RUNNING) {
     // Handle DNS requests for captive portal (AP mode only)
@@ -508,7 +546,9 @@ void CrossPointWebServerActivity::render(RenderLock&&) {
     const auto pageHeight = renderer.getScreenHeight();
 
     GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight},
-                   isApMode ? tr(STR_HOTSPOT_MODE) : tr(STR_FILE_TRANSFER), nullptr);
+                   WIFI_TRANSFER_ACTIVE() ? tr(STR_MODE_WIFI_TITLE)
+                                          : (isApMode ? tr(STR_HOTSPOT_MODE) : tr(STR_FILE_TRANSFER)),
+                   nullptr);
 
     if (state == WebServerActivityState::SERVER_RUNNING) {
       GUI.drawSubHeader(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight},
@@ -591,6 +631,13 @@ void CrossPointWebServerActivity::renderServerRunning() const {
     // Also show hostname URL
     std::string hostnameUrl = std::string(tr(STR_OR_HTTP_PREFIX)) + AP_HOSTNAME + ".local/";
     renderer.drawCenteredText(SMALL_FONT_ID, startY, hostnameUrl.c_str(), true);
+  }
+
+  if (WIFI_TRANSFER_ACTIVE()) {
+    // b65-s3c-pf9d: fixed hint under the transfer page — push is paused for the
+    // whole session; completing the transfer reboots back to NORMAL mode.
+    const int hintY = renderer.getScreenHeight() - renderer.getLineHeight(SMALL_FONT_ID) - 20;
+    renderer.drawCenteredText(SMALL_FONT_ID, hintY, tr(STR_MODE_WIFI_HINT), true);
   }
 
   const auto labels = mappedInput.mapLabels(tr(STR_EXIT), "", "", "");
