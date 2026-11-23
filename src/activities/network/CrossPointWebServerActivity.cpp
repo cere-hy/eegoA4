@@ -58,6 +58,7 @@ static inline unsigned wifiInternalMax() {
 // after the scan-cache path on this core). netif view first, Arduino fallback.
 static bool actStaHasIp(IPAddress* outIp) {
   IPAddress ip;
+  // "WIFI_STA_DEF" literal: this core has no ESP_NETIF_WIFI_STA_IF_KEY macro.
   esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   if (sta != nullptr) {
     esp_netif_ip_info_t info{};

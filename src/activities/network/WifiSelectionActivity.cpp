@@ -103,12 +103,15 @@ void WifiSelectionActivity::onPromptEvent(const fui::ActionEvent& event, void* u
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
 
-  // b65-s3c-pf9f (P0): clear any stale scan cache on ENTRY, before a fresh
-  // scan starts.  This used to live in onExit() and ran immediately after a
-  // successful GOT_IP on the WiFi-transfer route, where it made WiFi.status()
-  // read a stale WL_DISCONNECTED(6) and fooled the server-start gate.  Moving
-  // it here keeps the "clear old results" semantics but at a safe moment.
-  WiFi.scanDelete();
+  // b65-s3c-pf9g (P0, risk 1): deliberately NO scanDelete() here.  onEnter()
+  // runs before WiFi.mode()/WiFi.begin() initialize the STA netif, so clearing
+  // scan state at this point touches an uninitialized driver.  The pf9f
+  // placement here was harmless on this core (Arduino's scanDelete() only
+  // frees its own result buffer), but redundant: scan results are already
+  // cleared in the two safe places below — the scan-done callback and the
+  // "cancel scan" branch — and a fresh scan naturally overwrites stale data.
+  // The original onExit() call (right after GOT_IP) was the actual trigger of
+  // the stale status=6 failure and is gone; no cache clear is needed on entry.
 
   // b65-s3c-pf9b-4a gate point #2: direct-entry path, before any WiFi/BLE call.
   logPrintf("INF", "WIFI", "[WIFI] gate point=wifiOnEnter free=%u maxalloc=%u(internal)", wifiInternalFree(),

@@ -95,6 +95,10 @@ void onStaDisconnectedForDiagnostics(arduino_event_id_t, arduino_event_info_t in
 // Arduino accessor, which itself reads the same netif on this core.
 static bool staHasIp(IPAddress* outIp) {
   IPAddress ip;  // default-constructed == 0.0.0.0
+  // "WIFI_STA_DEF" is the IDF default-STA netif key.  Kept as a literal:
+  // this core (Arduino-ESP32 3.x / IDF 5.x) defines no ESP_NETIF_WIFI_STA_IF_KEY
+  // macro — using one would fail to compile.  Verified against the bundled
+  // esp_netif_defaults.h, which hardcodes the same literal at .if_key.
   esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   if (sta != nullptr) {
     esp_netif_ip_info_t info{};
