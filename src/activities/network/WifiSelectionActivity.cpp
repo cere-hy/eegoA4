@@ -9,6 +9,7 @@
 #include <esp_mac.h>
 #include <BlePushGatt.h>   // b65-s3c-pf9b: also carries the phase-1 diag switch
 #include <esp_wifi.h>
+#include <esp_heap_caps.h>  // internal-RAM-only gate probes (no PSRAM contamination)
 
 #include <algorithm>
 
@@ -26,6 +27,15 @@ namespace {
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SCAN = 2;
 constexpr fui::ActionId ACTION_PROMPT = 3;
+
+// b65-s3c-pf9b-4a gate/session probes: internal RAM only. ESP.getFreeHeap()
+// includes PSRAM and cannot answer the contiguous-block question.
+static inline unsigned wifiInternalFree() {
+  return static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+static inline unsigned wifiInternalMax() {
+  return static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
 }  // namespace
 
 WifiSelectionActivity::WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -92,6 +102,10 @@ void WifiSelectionActivity::onPromptEvent(const fui::ActionEvent& event, void* u
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
 
+  // b65-s3c-pf9b-4a gate point #2: direct-entry path, before any WiFi/BLE call.
+  logPrintf("INF", "WIFI", "[WIFI] gate point=wifiOnEnter free=%u maxalloc=%u(internal)", wifiInternalFree(),
+            wifiInternalMax());
+
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
   // ---- b65-s3c-pf9b phase-1 measurement (DIAGNOSTIC ONLY) --------------------
   // Entering the WiFi screen is the trigger. Capture the pre-init baseline,
@@ -103,12 +117,15 @@ void WifiSelectionActivity::onEnter() {
   blepushgatt::memxStopLadder();
   blepushgatt::memxWifiInitProbe();
 #else
-  // ---- b65-s3c-pf9b-3a FUNCTIONAL: enter WiFi page -> stop BLE (L2) ---------
-  // Stop-only: BLE is torn down on entry and stays off until a device reboot.
-  // No onExit / failure resume path exists in this build (clause 1).
+  // ---- b65-s3c-pf9c FUNCTIONAL: enter WiFi page -> stop BLE (L2) -------------
+  // Resume is intentionally NOT here and NOT on failure: the parent Web
+  // activity restores BLE only after WiFi is fully recycled.
   if (blepushgatt::stopForWifi()) {
     bleStoppedForWifi = (blepushgatt::wifiBleState() == blepushgatt::WifiBleState::STOPPED_FOR_WIFI);
+  } else {
+    bleStoppedForWifi = false;
   }
+  bleDead = (blepushgatt::wifiBleState() == blepushgatt::WifiBleState::DEAD);
 #endif
 
   // Load saved WiFi credentials - SD card operations need lock as we use SPI
@@ -200,8 +217,8 @@ void WifiSelectionActivity::onExit() {
   WiFi.scanDelete();
   LOG_DBG("WIFI", "Free heap after scanDelete: %d bytes", ESP.getFreeHeap());
 
-  // b65-s3c-pf9b-3a: NO resume on exit. BLE stays stopped until reboot; push
-  // recovery is a user-visible "reboot to restore" hint, not a software action.
+  // b65-s3c-pf9c: NO resume here. Leaving this page still leaves WiFi active;
+  // the parent Web activity resumes BLE only after its full WiFi recycle.
 
   LOG_DBG("WIFI", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
 }
@@ -217,14 +234,15 @@ void WifiSelectionActivity::startWifiScan(const bool autoScan) {
   networkRowItems.clear();
   requestUpdate();
 
-  // Set WiFi mode to station
+  // Set WiFi mode to station. pf9b-4a session probe: second-session bring-up
+  // after a prior esp_wifi_deinit() must re-borrow its internal heap.
+  const bool staModeOk = WiFi.mode(WIFI_STA);
+  logPrintf("INF", "WIFI", "[WIFI] session point=scanModeSta rc=%d free=%u maxalloc=%u(internal)",
+            static_cast<int>(staModeOk ? 0 : 1), wifiInternalFree(), wifiInternalMax());
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
-  const bool memxModeOk = WiFi.mode(WIFI_STA);
   logPrintf("INF", "MEMX", "[MEMX] wifi after_start  free=%u maxalloc=%u rc=0x%X",
             static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()),
-            static_cast<unsigned>(memxModeOk ? 0 : 1));
-#else
-  WiFi.mode(WIFI_STA);
+            static_cast<unsigned>(staModeOk ? 0 : 1));
 #endif
   WiFi.disconnect();
   delay(100);
@@ -500,7 +518,9 @@ void WifiSelectionActivity::attemptConnection() {
   requestUpdate();
 
   WiFi.persistent(false);  // Credentials are managed by WifiCredentialStore; suppress SDK NVS auto-connect
-  WiFi.mode(WIFI_STA);
+  const bool connectModeOk = WiFi.mode(WIFI_STA);
+  logPrintf("INF", "WIFI", "[WIFI] session point=connectModeSta rc=%d free=%u maxalloc=%u(internal)",
+            static_cast<int>(connectModeOk ? 0 : 1), wifiInternalFree(), wifiInternalMax());
   WiFi.disconnect(true, true);  // Abort any in-progress SDK auto-connect and clear NVS-saved SSID
   delay(100);
 
@@ -538,6 +558,13 @@ void WifiSelectionActivity::checkConnectionStatus() {
   }
 
   const wl_status_t status = WiFi.status();
+
+  // Terminal connect outcome for the recycled session. NO_MEM surfaces as a
+  // failed status with a low internal maxalloc, never as a PSRAM-based number.
+  if (status == WL_CONNECTED || status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
+    logPrintf("INF", "WIFI", "[WIFI] session point=connectEvent evt=%d free=%u maxalloc=%u(internal)",
+              static_cast<int>(status), wifiInternalFree(), wifiInternalMax());
+  }
 
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
   // One line per connection result so the acceptance sheet can read the exact
@@ -619,8 +646,9 @@ void WifiSelectionActivity::checkConnectionStatus() {
       handleAutoConnectFailure();
       return;
     }
-    // b65-s3c-pf9b-3a: no BLE restore on failure. BLE stays stopped until
-    // reboot (the fixed page hint tells the user). Keep the real WiFi error.
+    // b65-s3c-pf9c: no BLE restore on failure. WiFi still owns the radio here;
+    // resume belongs after the parent Web activity's full recycle. Keep the
+    // real WiFi error and let the fixed page hint describe the push pause.
     state = WifiSelectionState::CONNECTION_FAILED;
     requestUpdate();
     return;
@@ -635,7 +663,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
       handleAutoConnectFailure();
       return;
     }
-    // b65-s3c-pf9b-3a: no BLE restore on failure. Keep the real WiFi error.
+    // b65-s3c-pf9c: no BLE restore on failure; wait for the parent recycle.
     state = WifiSelectionState::CONNECTION_FAILED;
     requestUpdate();
     return;
@@ -917,11 +945,11 @@ void WifiSelectionActivity::render(RenderLock&&) {
                     cachedMacAddress.c_str());
 
 #if !defined(PF9B_MEMX_DIAG) || !PF9B_MEMX_DIAG
-  // b65-s3c-pf9b-3a: fixed line under the title — push is paused for the whole
-  // WiFi session and only returns after a device reboot. Static i18n literal.
+  // b65-s3c-pf9c: fixed line under the title. A DEAD stop/resume is terminal
+  // and tells the user to reboot; otherwise push is paused until WiFi recycle.
   UITheme::drawCenteredText(renderer, screen, SMALL_FONT_ID,
                             metrics.topPadding + metrics.headerHeight + metrics.tabBarHeight + 2,
-                            tr(STR_WIFI_PAUSES_PUSH), true);
+                            bleDead ? tr(STR_PUSH_STOPPED_REBOOT) : tr(STR_WIFI_PAUSES_PUSH), true);
 #endif
 
   switch (state) {

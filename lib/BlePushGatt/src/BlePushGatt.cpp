@@ -15,7 +15,7 @@
 #include <esp_system.h>
 #include <Logging.h>
 #include <push_ai_seg.h>  // plan B: 0x08/0x18/0x13 opcodes + caps encoder
-#include <esp_bt.h>            // b65-s3c-pf9b-3a: controller status log at stop (no resume)
+#include <esp_bt.h>            // b65-s3c-pf9c: controller status + adaptive resume
 #include <esp_system.h>        // esp_reset_reason / esp_get_free_heap_size
 #include <esp_heap_caps.h>     // heap_caps_get_largest_free_block (stop heap probe)
 #include <Arduino.h>           // ESP.getFreeHeap / millis (diag + heap probe)
@@ -52,7 +52,7 @@ NimBLECharacteristic* s_data = nullptr;
 NimBLECharacteristic* s_ctrl = nullptr;
 NimBLECharacteristic* s_statusChr = nullptr;
 std::atomic<bool> s_statusSubscribed{false};  // B4′: STATUS CCCD subscribed by peer
-// b65-s3c-pf9b-3a: stop-only WiFi/BLE state (ACTIVE -> STOPPED_FOR_WIFI, no resume).
+// b65-s3c-pf9c: WiFi/BLE state with DEAD as sticky terminal.
 std::atomic<uint8_t> s_wifiBleState{static_cast<uint8_t>(WifiBleState::ACTIVE)};
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
 std::atomic<bool> s_memxStopped{false};  // phase-1 one-way ladder latch
@@ -262,8 +262,8 @@ void loop() {
   // try to re-arm advertising against them.
   if (s_memxStopped.load(std::memory_order_acquire)) return;
 #else
-  // b65-s3c-pf9b-3a: once stopped for WiFi, stay stopped (no software resume —
-  // push returns only after reboot). Never re-arm advertising on a deinit'd host.
+  // b65-s3c-pf9c: while WiFi owns the radio (or resume failed terminally),
+  // never re-arm advertising against a deinit'd host.
   if (s_wifiBleState.load(std::memory_order_acquire) != static_cast<uint8_t>(WifiBleState::ACTIVE)) return;
 #endif
   if (!s_status.initialized) return;
@@ -324,14 +324,16 @@ void memxWifiInitProbe() {
 }
 #endif
 
-// ---- b65-s3c-pf9b-3a FUNCTIONAL: WiFi/BLE time-division (STOP ONLY) ----------
+// ---- b65-s3c-pf9c FUNCTIONAL: WiFi/BLE time-division (STOP + SAFE RESUME) ----
 // L2 teardown on entering the WiFi-settings page. clearAll=false keeps NVS bonds
-// so the phone never re-pairs. There is deliberately NO resume path in this
-// build: BLE stays stopped until the device reboots (clause 1). This removes the
-// deinit(true)+init() + host_task churn that caused the pf9b-2 crash.
+// so the phone never re-pairs. With the private NimBLE host-exit handshake,
+// deinit(false) now returns false if nimble_port_stop() timed out; in that case
+// the state becomes DEAD and NO further deinit/resume is attempted.
 bool stopForWifi() {
   const uint8_t st = s_wifiBleState.load(std::memory_order_acquire);
-  if (st == static_cast<uint8_t>(WifiBleState::STOPPED_FOR_WIFI)) return true;  // idempotent
+  if (st == static_cast<uint8_t>(WifiBleState::DEAD)) return false;              // sticky terminal
+  if (st == static_cast<uint8_t>(WifiBleState::STOPPED_FOR_WIFI)) return true;   // idempotent
+  if (st == static_cast<uint8_t>(WifiBleState::RESUMING)) return false;          // no overlap
 
   // Clause 3: heap probe BEFORE teardown — log only, no decision. Both raw IDs
   // the sheet asked for: esp_get_free_heap_size + heap_caps_get_largest_free_block.
@@ -346,10 +348,19 @@ bool stopForWifi() {
   }
   s_status.advertising = false;
 
-  // L2: deinit the NimBLE host, keeping bonds.
+  // L2: deinit the NimBLE host, keeping bonds. The patched port waits for the
+  // real host-task exit; a false result means stop error/timeout, so the caller
+  // must not continue to teardown bookkeeping that assumes deinit succeeded.
+  bool deinitOk = true;
   if (NimBLEDevice::isInitialized()) {
-    NimBLEDevice::deinit(false);
+    deinitOk = NimBLEDevice::deinit(false);
   }
+  if (!deinitOk || NimBLEDevice::isInitialized()) {
+    s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::DEAD), std::memory_order_release);
+    logPrintf("INF", "WFBLE", "[WFBLE] stop FAILED (host exit timeout / stop error) -> DEAD; reboot required");
+    return false;
+  }
+
   s_status.initialized = false;
   s_server = nullptr;
   s_data = s_ctrl = s_statusChr = nullptr;
@@ -360,6 +371,58 @@ bool stopForWifi() {
   // 0=IDLE, 1=INITED (initialized but disabled), 2=ENABLED.
   logPrintf("INF", "WFBLE", "[WFBLE] stop done; controller_status=%d",
             static_cast<int>(esp_bt_controller_get_status()));
+  return true;
+}
+
+// Conservative scheme A resume. Never bypasses NimBLEDevice::init(): begin()
+// calls it internally. The caller must invoke this only after the parent Web
+// activity has fully recycled WiFi (esp_wifi_disconnect/stop/deinit).
+bool resumeForWifi() {
+  const uint8_t st0 = s_wifiBleState.load(std::memory_order_acquire);
+  if (st0 == static_cast<uint8_t>(WifiBleState::DEAD)) {
+    logPrintf("INF", "WFBLE", "[WFBLE] resume skipped (DEAD terminal)");
+    return false;
+  }
+  if (st0 == static_cast<uint8_t>(WifiBleState::ACTIVE)) return true;   // idempotent
+  if (st0 == static_cast<uint8_t>(WifiBleState::RESUMING)) return false; // no overlap
+
+  s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::RESUMING), std::memory_order_release);
+  const uint32_t t0 = static_cast<uint32_t>(millis());
+
+  const esp_bt_controller_status_t cst = esp_bt_controller_get_status();
+  logPrintf("INF", "WFBLE", "[WFBLE] resume start; controller_status=%d", static_cast<int>(cst));
+
+  if (cst == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    logPrintf("INF", "WFBLE", "[WFBLE] branch=ENABLED");
+    const esp_err_t rcDis = esp_bt_controller_disable();
+    logPrintf("INF", "WFBLE", "[WFBLE] controller_disable rc=0x%X", static_cast<unsigned>(rcDis));
+    const esp_err_t rcDeinit = esp_bt_controller_deinit();
+    logPrintf("INF", "WFBLE", "[WFBLE] controller_deinit rc=0x%X", static_cast<unsigned>(rcDeinit));
+  } else if (cst == ESP_BT_CONTROLLER_STATUS_INITED) {
+    logPrintf("INF", "WFBLE", "[WFBLE] branch=INITED");
+    const esp_err_t rcDeinit = esp_bt_controller_deinit();
+    logPrintf("INF", "WFBLE", "[WFBLE] controller_deinit rc=0x%X", static_cast<unsigned>(rcDeinit));
+  } else if (cst == ESP_BT_CONTROLLER_STATUS_IDLE) {
+    logPrintf("INF", "WFBLE", "[WFBLE] branch=IDLE (init directly)");
+  } else {
+    logPrintf("INF", "WFBLE", "[WFBLE] branch=OTHER(%d); attempting init as-is", static_cast<int>(cst));
+  }
+
+  // Clear stale C++ GATT objects only; m_initialized is already false after a
+  // successful stop, so this never touches the patched host-exit path. NVS
+  // bonds are untouched by deinit(true).
+  NimBLEDevice::deinit(true);
+
+  const bool ok = begin();
+  const uint32_t elapsed = static_cast<uint32_t>(millis()) - t0;
+  if (!ok) {
+    s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::DEAD), std::memory_order_release);
+    logPrintf("INF", "WFBLE", "[WFBLE] resume FAILED in %ums -> DEAD", elapsed);
+    return false;
+  }
+  s_wifiBleState.store(static_cast<uint8_t>(WifiBleState::ACTIVE), std::memory_order_release);
+  logPrintf("INF", "WFBLE", "[WFBLE] resume OK in %ums; advertising=%d discoverable", elapsed,
+            s_status.advertising ? 1 : 0);
   return true;
 }
 
@@ -523,6 +586,7 @@ bool canNotifyScene() { return false; }
 bool sendStatusFrame(const uint8_t*, size_t) { return false; }
 WifiBleState wifiBleState() { return WifiBleState::ACTIVE; }
 bool stopForWifi() { return true; }
+bool resumeForWifi() { return true; }
 void clearBleNvsCacheAfterPanic() {}
 #if defined(PF9B_MEMX_DIAG) && PF9B_MEMX_DIAG
 void memxStopLadder() {}

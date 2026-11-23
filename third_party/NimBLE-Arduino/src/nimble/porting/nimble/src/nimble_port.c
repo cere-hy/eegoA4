@@ -33,6 +33,7 @@
 #include "esp_intr_alloc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #if CONFIG_BT_CONTROLLER_ENABLED
 #include "esp_bt.h"
 #endif
@@ -66,6 +67,40 @@ static struct ble_npl_eventq g_eventq_dflt;
 static struct ble_npl_sem ble_hs_stop_sem;
 static struct ble_hs_stop_listener stop_listener;
 static struct ble_npl_event ble_hs_ev_stop;
+
+/* ---- b65-s3c-pf9c: host-task exit handshake (PRIVATE patch P-001) -----------
+ * Root cause: nimble_port_stop()'s second sem_pend returns as soon as
+ * nimble_port_stop_cb() runs, but the host task is still inside
+ * nimble_port_run() and has NOT returned / called nimble_port_freertos_deinit().
+ * nimble_port_deinit() then frees the event queue the task still touches ->
+ * InstrFetchProhibited / PC=0x0. We make stop() wait until the host task has
+ * actually signalled its exit from NimBLEDevice::host_task().
+ */
+#define HOST_TASK_EXITED  (1 << 0)
+static EventGroupHandle_t s_host_task_exited = NULL;
+
+void nimble_port_host_exited_signal(void)
+{
+    if (s_host_task_exited) {
+        xEventGroupSetBits(s_host_task_exited, HOST_TASK_EXITED);
+    }
+}
+
+esp_err_t nimble_port_wait_host_exit(uint32_t timeout_ms)
+{
+    if (!s_host_task_exited) {
+        return ESP_OK;  /* idempotent: init never ran / already deinited */
+    }
+    EventBits_t bits = xEventGroupWaitBits(
+        s_host_task_exited, HOST_TASK_EXITED,
+        pdTRUE /* clear on exit */, pdFALSE /* any bit */,
+        pdMS_TO_TICKS(timeout_ms));
+    if ((bits & HOST_TASK_EXITED) == 0) {
+        ESP_LOGE(NIMBLE_PORT_LOG_TAG, "host task exit timeout (%u ms)", (unsigned)timeout_ms);
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
 
 /**
  * Called when the host stop procedure has completed.
@@ -159,6 +194,19 @@ nimble_port_init(void)
 {
     esp_err_t ret;
 
+    /* b65-s3c-pf9c P-001: create the host-exit handshake freshly each init and
+     * CLEAR the bit first — otherwise a second init would observe the previous
+     * session's stale HOST_TASK_EXITED and stop() would return immediately,
+     * defeating the whole guard. */
+    if (!s_host_task_exited) {
+        s_host_task_exited = xEventGroupCreate();
+        if (!s_host_task_exited) {
+            ESP_LOGE(NIMBLE_PORT_LOG_TAG, "host exit event group create failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    xEventGroupClearBits(s_host_task_exited, HOST_TASK_EXITED);
+
 #if false // Arduino disable
 #if CONFIG_IDF_TARGET_ESP32 && CONFIG_BT_CONTROLLER_ENABLED
     esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
@@ -245,6 +293,14 @@ nimble_port_deinit(void)
     //bt_hci_log_deinit();
 #endif // (BT_HCI_LOG_INCLUDED == TRUE)
 
+    /* b65-s3c-pf9c P-001: destroy the handshake LAST (after host resources
+     * are gone), so any stop() racing in sees NULL and takes the idempotent
+     * path rather than waiting on a freed group. */
+    if (s_host_task_exited) {
+        vEventGroupDelete(s_host_task_exited);
+        s_host_task_exited = NULL;
+    }
+
     return ESP_OK;
 }
 
@@ -282,6 +338,19 @@ nimble_port_stop(void)
     ble_npl_sem_deinit(&ble_hs_stop_sem);
 
     ble_npl_event_deinit(&ble_hs_ev_stop);
+
+    /* b65-s3c-pf9c P-001: the two sem_pend() calls above only prove the stop
+     * callbacks ran — the host task is still inside nimble_port_run(). Wait
+     * for the real exit signal from NimBLEDevice::host_task() before allowing
+     * deinit() to free the event queue. Idempotent path (group == NULL) skips
+     * both the wait and the compensation delay. */
+    if (s_host_task_exited) {
+        int wrc = nimble_port_wait_host_exit(2000);
+        if (wrc != ESP_OK) {
+            return wrc;  /* timeout: caller must NOT proceed to deinit */
+        }
+        vTaskDelay(2);   /* let idle reclaim the host task TCB/stack */
+    }
 
     return ESP_OK;
 }

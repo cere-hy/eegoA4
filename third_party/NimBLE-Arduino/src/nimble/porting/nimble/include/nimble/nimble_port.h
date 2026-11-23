@@ -61,6 +61,16 @@ esp_err_t nimble_port_deinit(void);
 void nimble_port_run(void);
 int nimble_port_stop(void);
 
+/**
+ * b65-s3c-pf9c P-001 (private patch): host-task exit handshake.
+ * The host task calls signal() once it has returned from nimble_port_run();
+ * stop() calls wait() to make sure deinit() cannot free the event queue while
+ * the task is still inside it. The EventGroup stays file-private in
+ * nimble_port.c; only these two functions cross the compilation boundary.
+ */
+void nimble_port_host_exited_signal(void);
+esp_err_t nimble_port_wait_host_exit(uint32_t timeout_ms);
+
 
 /**
  * @brief esp_nimble_init - Initialize the NimBLE host stack

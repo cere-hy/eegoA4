@@ -1,5 +1,6 @@
 #include "CrossPointWebServerActivity.h"
 
+#include <BlePushGatt.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <FontCacheManager.h>
@@ -7,6 +8,9 @@
 #include <HalGPIO.h>
 #include <I18n.h>
 #include <WiFi.h>
+#include <esp_err.h>
+#include <esp_heap_caps.h>  // internal-RAM-only gate probes (no PSRAM contamination)
+#include <esp_wifi.h>       // esp_wifi_disconnect/stop/deinit recycle ladder
 
 #include <cstddef>
 
@@ -34,6 +38,15 @@ constexpr int QR_CODE_HEIGHT = 198;
 // DNS server for captive portal (redirects all DNS queries to our IP)
 DNSServer* dnsServer = nullptr;
 constexpr uint16_t DNS_PORT = 53;
+
+// b65-s3c-pf9b-4a internal-heap probes. ESP.getFreeHeap()/esp_get_free_heap_size()
+// include PSRAM and cannot answer the WiFi contiguous-block question.
+static inline unsigned wifiInternalFree() {
+  return static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+static inline unsigned wifiInternalMax() {
+  return static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
 
 void stopDnsServer() {
   if (!dnsServer) return;
@@ -65,6 +78,10 @@ int barsForRssi(int rssi, int currentBars) {
 
 void CrossPointWebServerActivity::onEnter() {
   Activity::onEnter();
+
+  // b65-s3c-pf9b-4a gate point #0: before SD-font cache release mutates heap.
+  logPrintf("INF", "WIFI", "[WIFI] gate point=webActOnEnter free=%u maxalloc=%u(internal)", wifiInternalFree(),
+            wifiInternalMax());
 
   LOG_DBG("WEBACT", "Free heap at onEnter: %d bytes", ESP.getFreeHeap());
 
@@ -113,23 +130,44 @@ void CrossPointWebServerActivity::onExit() {
   LOG_DBG("WEBACT", "Free heap at onExit start: %d bytes", ESP.getFreeHeap());
 
   state = WebServerActivityState::SHUTTING_DOWN;
+
+  // Application layer FIRST: DNS -> mDNS -> Web/WS server, then WiFi. No
+  // handler may touch a deinitialised WiFi driver.
   stopDnsServer();
   MDNS.end();
+  webServer.reset();
 
-  // Web uploads may have installed or removed plugins. Non-touch devices
-  // reboot below (setup() re-reads everything), but touch devices end the
-  // session in place, so re-read event subscriptions here.
+  // Web uploads may have installed or removed plugins; the session now ends in
+  // place, so re-read event subscriptions here.
   pluginevents::refreshSubscriptions();
 
-  // Skip reboot if WiFi was never activated (e.g. user backed out of mode selection).
+  // b65-s3c-pf9b-4a recycle ladder + b65-s3c-pf9c safe resume point. BLE is
+  // resumed ONLY after WiFi is fully recycled, never at WiFi-page exit.
   if (WiFi.getMode() != WIFI_MODE_NULL) {
-    if (isApMode) {
-      WiFi.softAPdisconnect(true);
-    } else {
-      WiFi.disconnect(false);
-    }
-    delay(30);
-    silentRestart();
+    esp_wifi_disconnect();
+    logPrintf("INF", "WIFI", "[WIFI] recycle step=disconnect free=%u maxalloc=%u", wifiInternalFree(),
+              wifiInternalMax());
+
+    esp_wifi_stop();
+    logPrintf("INF", "WIFI", "[WIFI] recycle step=stop free=%u maxalloc=%u", wifiInternalFree(),
+              wifiInternalMax());
+
+    const esp_err_t deinitRc = esp_wifi_deinit();
+    logPrintf("INF", "WIFI", "[WIFI] recycle step=deinit free=%u maxalloc=%u", wifiInternalFree(),
+              wifiInternalMax());
+    logPrintf("INF", "WIFI", "[WIFI] recycle deinit rc=0x%X", static_cast<unsigned>(deinitRc));
+  } else {
+    logPrintf("INF", "WIFI", "[WIFI] recycle skipped (WiFi already NULL) free=%u maxalloc=%u", wifiInternalFree(),
+              wifiInternalMax());
+  }
+
+  if (blepushgatt::wifiBleState() == blepushgatt::WifiBleState::STOPPED_FOR_WIFI) {
+    const bool ok = blepushgatt::resumeForWifi();
+    logPrintf("INF", "WFBLE", "[WFBLE] resume-after-wifi-recycle ok=%d state=%d", ok ? 1 : 0,
+              static_cast<int>(blepushgatt::wifiBleState()));
+  } else {
+    logPrintf("INF", "WFBLE", "[WFBLE] resume-after-wifi-recycle skipped; state=%d",
+              static_cast<int>(blepushgatt::wifiBleState()));
   }
 
   LOG_DBG("WEBACT", "Free heap at onExit end: %d bytes", ESP.getFreeHeap());
@@ -144,6 +182,11 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
   if (mode == NetworkMode::JOIN_NETWORK && !startInJoinNetwork) {
     silentRestartToJoinNetwork();  // does not return on non-touch boards
   }
+
+  // b65-s3c-pf9b-4a gate point #1: after the possible defrag reboot and before
+  // WiFi.mode(WIFI_STA)/subactivity startup touch the heap.
+  logPrintf("INF", "WIFI", "[WIFI] gate point=joinBranch free=%u maxalloc=%u(internal)", wifiInternalFree(),
+            wifiInternalMax());
 
   const char* modeName = "Join Network";
   if (mode == NetworkMode::CONNECT_CALIBRE) {
@@ -160,7 +203,7 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
   LOG_DBG("WEBACT", "Network mode selected: %s", modeName);
 
   // The OPDS browser joins Wi-Fi itself. Wi-Fi is still on if the user backed
-  // out of Join Network; turn it off so onExit does not restart to Home.
+  // out of Join Network; turn it off so onExit has no WiFi to recycle.
   if (mode == NetworkMode::OPDS_BROWSER) {
     if (WiFi.getMode() != WIFI_MODE_NULL) {
       WiFi.disconnect(false);
@@ -200,7 +243,9 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
   if (mode == NetworkMode::JOIN_NETWORK) {
     // STA mode - launch WiFi selection
     LOG_DBG("WEBACT", "Turning on WiFi (STA mode)...");
-    WiFi.mode(WIFI_STA);
+    const bool staModeOk = WiFi.mode(WIFI_STA);
+    logPrintf("INF", "WIFI", "[WIFI] session point=modeSta rc=%d free=%u maxalloc=%u(internal)",
+              static_cast<int>(staModeOk ? 0 : 1), wifiInternalFree(), wifiInternalMax());
 
     state = WebServerActivityState::WIFI_SELECTION;
     LOG_DBG("WEBACT", "Launching WifiSelectionActivity...");

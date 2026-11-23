@@ -93,25 +93,31 @@ bool canNotifyScene();
 // sink can also emit an explicit failure status. No-op when no link/subscribe.
 bool sendStatusFrame(const uint8_t* frame, size_t len);
 
-// ---- b65-s3c-pf9b-3a FUNCTIONAL: WiFi/BLE time-division (stop only) ----------
-// pf9b-3a is the minimal-usable WiFi build: entering the WiFi-settings page
-// tears BLE down (L2) and it is NEVER resumed in software — push comes back
-// only after a device reboot. This removes the resume/deinit(true)/init() churn
-// that produced the host_task crash and the Web-server memory starvation.
-//
-// State reduced to two values (no RESUMING, no DEAD):
+// ---- b65-s3c-pf9c FUNCTIONAL: WiFi/BLE time-division (stop + safe resume) ---
+// The pf9c private NimBLE patch makes nimble_port_stop() wait for the real host
+// task exit before deinit(), so the pf9b-2 stop/resume flow can be restored
+// without the PC=0x0 crash. Resume is called only AFTER the parent Web activity
+// has fully recycled WiFi (disconnect/stop/deinit), never on WiFi-page exit.
 enum class WifiBleState : uint8_t {
   ACTIVE = 0,        // BLE resident, normal operation
-  STOPPED_FOR_WIFI,  // L2 teardown done; stays stopped until reboot
+  STOPPED_FOR_WIFI,  // L2 teardown done; WiFi owns the radio
+  RESUMING,          // resume in progress
+  DEAD,              // stop/resume failed terminally; reboot required
 };
 WifiBleState wifiBleState();
 
 // L2 teardown on entering the WiFi-settings page: stop advertising, then
 // NimBLEDevice::deinit(false) (host resources released, NVS bonds preserved).
-// Idempotent. Emits one [WFBLE] pre-heap snapshot (esp_get_free_heap_size +
-// heap_caps_get_largest_free_block, log only — no decision) and the post-deinit
-// controller status. No resume path exists after this call.
+// Idempotent. Emits one [WFBLE] pre-heap snapshot and the post-deinit
+// controller status. On host-exit timeout it enters the sticky DEAD state and
+// returns false; the caller must NOT proceed to deinit or pretend BLE is online.
 bool stopForWifi();
+
+// Adaptive resume after WiFi has been fully recycled. Conservative scheme A:
+// read esp_bt_controller_get_status(), move the controller to IDLE only if
+// needed, then rebuild through the normal NimBLEDevice::init()/begin() path.
+// Idempotent. Failure enters the sticky DEAD state and returns false.
+bool resumeForWifi();
 
 // Called once at startup (from begin()). If the previous boot ended in a PANIC,
 // erase only NimBLE's transient cache keys in NVS namespace "nimble_bond"

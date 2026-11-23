@@ -73,9 +73,11 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   std::string connectedIP;
   std::string connectionError;
 
-  // b65-s3c-pf9b-3a: stop-only WiFi/BLE time-division. BLE is torn down on
-  // entering this page and NEVER resumed in software (push returns on reboot).
+  // b65-s3c-pf9c: WiFi/BLE time-division. BLE is torn down on entering this
+  // page and resumed by the parent after WiFi is fully recycled. A DEAD state
+  // is terminal and must not be retried.
   bool bleStoppedForWifi = false;  // this page performed the L2 teardown
+  bool bleDead = false;            // stop/resume failed terminally (reboot hint)
 
   // Password to potentially save (from keyboard or saved credentials)
   std::string enteredPassword;

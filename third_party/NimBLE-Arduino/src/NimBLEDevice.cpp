@@ -884,6 +884,10 @@ void NimBLEDevice::onSync(void) {
 void NimBLEDevice::host_task(void* param) {
     NIMBLE_LOGI(LOG_TAG, "NimBLE Started!");
     nimble_port_run(); // This function will return only when nimble_port_stop() is executed
+    // b65-s3c-pf9c P-001 (private patch): signal real exit AFTER nimble_port_run()
+    // returns but BEFORE the task deletes itself, so stop()'s wait() unblocks
+    // and deinit() never frees the event queue under a still-running task.
+    nimble_port_host_exited_signal();
     nimble_port_freertos_deinit();
 } // host_task
 
