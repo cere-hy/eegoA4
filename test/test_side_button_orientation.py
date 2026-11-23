@@ -204,6 +204,6 @@ with tempfile.TemporaryDirectory() as directory:
     (tmp / "HalGPIO.h").write_text(stub)
     (tmp / "orientation.cpp").write_text(harness)
     subprocess.run(["c++", "-std=c++20", "-Wall", "-Wextra", "-Werror", "-I" + directory,
-                    "-I" + str(ROOT / "src"), "-I" + str(ROOT / "freeink-sdk/libs/ui/FreeInkUI/include"), str(tmp / "orientation.cpp"), "-o", str(tmp / "orientation")], check=True)
+                    "-I" + str(ROOT / "src"), "-I" + str(ROOT / "third_party/freeink-sdk/libs/ui/FreeInkUI/include"), str(tmp / "orientation.cpp"), "-o", str(tmp / "orientation")], check=True)
     subprocess.run([str(tmp / "orientation")], check=True)
 print("Passed: front/side page turns, 3,360 button mappings, legacy settings, and all 16 rotation previews")

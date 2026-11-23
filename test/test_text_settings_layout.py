@@ -413,11 +413,11 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run([
         "c++", "-std=c++17", "-DFREEINK_DEVICE_X3=1", "-DFREEINK_DEVICE_X4=1",
         "-DFREEINK_CAP_TOUCH=1", "-I", str(ROOT / "src"),
-        "-I", str(ROOT / "freeink-sdk/libs/hardware/XteinkDetect/test/host/stubs"),
-        "-I", str(ROOT / "freeink-sdk/libs/hardware/BoardConfig/include"), "-I",
-        str(ROOT / "freeink-sdk/libs/ui/FreeInkUI/include"),
+        "-I", str(ROOT / "third_party/freeink-sdk/libs/hardware/XteinkDetect/test/host/stubs"),
+        "-I", str(ROOT / "third_party/freeink-sdk/libs/hardware/BoardConfig/include"), "-I",
+        str(ROOT / "third_party/freeink-sdk/libs/ui/FreeInkUI/include"),
         "-I", str(ROOT / "lib/EpdFont"), "-I", str(ROOT / "lib/Utf8"),
-        str(ROOT / "freeink-sdk/libs/ui/FreeInkUI/src/FreeInkUI.cpp"),
+        str(ROOT / "third_party/freeink-sdk/libs/ui/FreeInkUI/src/FreeInkUI.cpp"),
         str(ROOT / "lib/EpdFont/EpdFont.cpp"), str(ROOT / "lib/Utf8/Utf8.cpp"),
         str(cpp), "-o", str(executable),
     ], check=True)

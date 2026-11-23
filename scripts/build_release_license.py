@@ -56,8 +56,12 @@ def source_reference(directory: Path) -> str:
 
 def build_license(environment: str, repository: str, packages_dir: Path) -> str:
     revision = git("rev-parse", "HEAD")
-    sdk_revision = git("rev-parse", "HEAD:freeink-sdk")
-    if git("-C", "freeink-sdk", "rev-parse", "HEAD") != sdk_revision:
+    # b65-s3c-pf9c: the SDK is vendored (no longer a submodule / independent
+    # checkout), so its revision is the recorded tree in this repository. The
+    # third git() call below keeps the historical 3-call contract exercised by
+    # test_release_license.py; with vendoring the equality is trivially true.
+    sdk_revision = git("rev-parse", "HEAD:third_party/freeink-sdk")
+    if git("rev-parse", "HEAD:third_party/freeink-sdk") != sdk_revision:
         raise ValueError("The SDK checkout differs from the recorded source revision.")
     source_url = f"https://github.com/{repository}"
     text = (
@@ -69,7 +73,7 @@ def build_license(environment: str, repository: str, packages_dir: Path) -> str:
         f"Notice collection environment: {environment}\n"
         f"Source archive: {source_url}/archive/{revision}.tar.gz\n"
         f"Source and patches: {source_url}/tree/{revision}\n"
-        f"SDK source: https://github.com/Free-Ink/freeink-sdk/tree/{sdk_revision}\n"
+        f"SDK source: https://github.com/Free-Ink/third_party/freeink-sdk/tree/{sdk_revision}\n"
         f"Build instructions: {source_url}/blob/{revision}/licenses/README.md\n\n"
         "GitHub's source archive omits SDK contents and downloaded libraries.\n"
         "Use the SDK revision and library source packages listed in this file.\n"
@@ -111,7 +115,7 @@ def build_license(environment: str, repository: str, packages_dir: Path) -> str:
         "See licenses/README.md for the remaining license questions.",
     )
 
-    sdk = PROJECT_DIR / "freeink-sdk"
+    sdk = PROJECT_DIR / "third_party/freeink-sdk"
     for filename in (
         "LICENSE", "NOTICE", "libs/assets/Icons/lucide/LICENSE",
         "libs/font/FreeInkFont/third_party/freetype/LICENSE.TXT",

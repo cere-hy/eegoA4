@@ -40,3 +40,15 @@ flake.*
 # Structural-equivalent synthetic fixtures (*_structure.xhtml) ARE committed for CI.
 test/chapter_html_slim_parser/fixtures/real/*.epub
 test/chapter_html_slim_parser/fixtures/real/*.xhtml
+# b65-s3c-pf9c: private-fork hygiene. Already-tracked builtin fonts and
+# ui-hanzi.bin stay tracked (gitignore cannot untrack); these block NEW ones.
+*.ttf
+*.otf
+*.ttc
+*.bin
+*.elf
+*.fmap
+third_party/freeink-sdk/**/*.o
+third_party/freeink-sdk/**/*.a
+/fonts/
+.git-credentials

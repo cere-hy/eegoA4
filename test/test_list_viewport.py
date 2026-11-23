@@ -65,8 +65,8 @@ with tempfile.TemporaryDirectory() as directory:
     cpp.write_text("#include <initializer_list>\n" + harness)
     subprocess.run([
         "c++", "-std=c++17", "-I",
-        str(ROOT / "freeink-sdk/libs/ui/FreeInkUI/include"),
-        str(ROOT / "freeink-sdk/libs/ui/FreeInkUI/src/FreeInkUI.cpp"),
+        str(ROOT / "third_party/freeink-sdk/libs/ui/FreeInkUI/include"),
+        str(ROOT / "third_party/freeink-sdk/libs/ui/FreeInkUI/src/FreeInkUI.cpp"),
         str(cpp), "-o", str(executable),
     ], check=True)
     subprocess.run([str(executable)], check=True)
