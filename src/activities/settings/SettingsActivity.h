@@ -21,6 +21,7 @@ enum class SettingAction {
   KOReaderSync,
   OPDSBrowser,
   Network,
+  WifiTransfer,  // pf9e problem B: WiFi Transfer entry (moved here from Home)
   Bluetooth,
   ClearCache,
   DisplayRefresh,

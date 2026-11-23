@@ -15,7 +15,9 @@
 
 #include "AboutActivity.h"
 #include "BleSettingsActivity.h"
+#include "BootMode.h"
 #include "ButtonRemapActivity.h"
+#include "CrossPointState.h"
 #include "ClearCacheActivity.h"
 #include "ClockSettingsActivity.h"
 #include "CrossPointSettings.h"
@@ -33,6 +35,7 @@
 #include "SilentRestart.h"
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
+#include "WifiTransferMode.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
@@ -41,6 +44,8 @@
 #include "fontIds.h"
 #include "util/PluginEvents.h"
 #include "util/TaskWatchdog.h"
+
+#include <esp_system.h>
 
 namespace fui = freeink::ui;
 
@@ -190,6 +195,10 @@ void SettingsActivity::rebuildSettings() {
   addAction(SettingsSection::Reader, StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache);
 
   addAction(SettingsSection::Network, StrId::STR_WIFI_NETWORKS, SettingAction::Network);
+  // b65-s3c-pf9e problem B: WiFi Transfer entry moved here from Home (which
+  // overflowed its fixed 5-row layout). Semantically it is a connectivity
+  // feature, so Settings > Connectivity is its natural home.
+  addAction(SettingsSection::Network, StrId::STR_MODE_WIFI_TITLE, SettingAction::WifiTransfer);
   if (bleturner::status().compiledIn) {
     addAction(SettingsSection::Network, StrId::STR_BT_PAGE_TURNER, SettingAction::Bluetooth);
   }
@@ -414,7 +423,31 @@ void SettingsActivity::toggleSelectedSetting() {
       case SettingAction::OPDSBrowser:
         startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
         break;
+      case SettingAction::WifiTransfer: {
+        // b65-s3c-pf9e problem B: arm the one-shot WIFI boot flag and restart,
+        // exactly as the old Home entry did. A software restart yields ESP_RST_SW,
+        // which setup() requires before activating WiFi-transfer mode.
+        SETTINGS.saveToFile();
+        APP_STATE.saveToFile();
+        bootmode::set(bootmode::Mode::WIFI);
+        LOG_INF("SETTINGS", "WiFi Transfer entry: boot_mode=WIFI armed; restarting");
+        esp_restart();
+        break;
+      }
       case SettingAction::Network: {
+        // b65-s3c-pf9e problem C: while a WiFi-transfer session is active, the
+        // legacy "Wi-Fi Networks" credential row must NOT open the old
+        // standalone WifiSelection path (which leaves BLE running and later
+        // collides with WiFi on memory). Redirect it into the lightweight
+        // WiFi-transfer flow instead.
+        if (WIFI_TRANSFER_ACTIVE()) {
+          LOG_INF("SETTINGS", "problem C: WiFi-transfer active; redirecting Wi-Fi Networks row to WiFi Transfer");
+          SETTINGS.saveToFile();
+          APP_STATE.saveToFile();
+          bootmode::set(bootmode::Mode::WIFI);
+          esp_restart();
+          break;
+        }
         auto activity = makeUniqueNoThrow<WifiSelectionActivity>(renderer, mappedInput, false);
         if (!activity) {
           LOG_ERR("SETTINGS", "OOM: WifiSelectionActivity");

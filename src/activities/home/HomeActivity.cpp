@@ -31,7 +31,7 @@
 #include <esp_system.h>
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 6;  // File Browser, Library, File transfer, Settings, PUSH, WiFi Transfer (pf9d)
+  int count = 5;  // File Browser, Library, File transfer, Settings, PUSH (pf9e: WiFi Transfer entry moved to Settings > Connectivity)
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -398,9 +398,7 @@ void HomeActivity::loop() {
       case HomeMenuItem::PUSH:
         onPushOpen();
         break;
-      case HomeMenuItem::WIFI_TRANSFER:
-        onWifiTransferOpen();
-        break;
+      // pf9e: WIFI_TRANSFER removed from Home (moved to Settings > Connectivity).
       default:
         break;
     }
@@ -611,9 +609,12 @@ void HomeActivity::render(RenderLock&&) {
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
+  // b65-s3c-pf9e problem B: the "WiFi Transfer" row was overflowing the fixed
+  // Home menu layout. It now lives under Settings > Connectivity (Network),
+  // which is also where it semantically belongs. Home stays at 5 rows.
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE), tr(STR_PUSH), tr(STR_MODE_WIFI_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings, Push, Wifi};
+                                        tr(STR_SETTINGS_TITLE), tr(STR_PUSH)};
+  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings, Push};
 
   if (slotItem() != HomeMenuItem::NONE) {
     menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));

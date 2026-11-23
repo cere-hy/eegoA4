@@ -39,8 +39,9 @@ static inline unsigned wifiInternalMax() {
 }  // namespace
 
 WifiSelectionActivity::WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                             const bool autoConnect)
-    : Activity("WifiSelection", renderer, mappedInput), UiAppHost(renderer), allowAutoConnect(autoConnect) {}
+                                             const bool autoConnect, const bool retryHintOnEnter)
+    : Activity("WifiSelection", renderer, mappedInput), UiAppHost(renderer), allowAutoConnect(autoConnect),
+      retryHintOnEnter(retryHintOnEnter) {}
 
 void WifiSelectionActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<WifiSelectionActivity*>(user);
@@ -179,6 +180,17 @@ void WifiSelectionActivity::onEnter() {
 
   // Trigger first update to show scanning message
   requestUpdate();
+
+  // b65-s3c-pf9e problem D: re-entered after the parent failed to start the
+  // web server. Stay on this page with a one-shot retry hint rather than
+  // auto-connecting again; Back/Confirm already routes CONNECTION_FAILED back
+  // to the network list so the user can pick another network or return.
+  if (retryHintOnEnter) {
+    state = WifiSelectionState::CONNECTION_FAILED;
+    connectionError = tr(STR_WIFI_RETRY_HINT);
+    requestUpdate();
+    return;
+  }
 
   // Attempt to auto-connect to known networks. Try the last successful
   // network first for speed, then scan and try any visible saved networks by

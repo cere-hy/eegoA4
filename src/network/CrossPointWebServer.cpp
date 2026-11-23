@@ -70,6 +70,20 @@ static void sendStaticContent(WebServer* server, const char* data, size_t len, c
                               const char* contentType);
 
 namespace {
+
+// b65-s3c-pf9e problem A: remember the most recent STA disconnect reason so the
+// "Cannot start webserver" line can distinguish "never associated" (no event /
+// reason 0) from "associated then dropped" (real reason code + name). Captured
+// from the Arduino WiFi event bus, which is the only source in this core
+// version (there is no WiFi.getReason()).
+volatile int g_lastStaDisconnectReason = 0;
+const char* g_lastStaDisconnectReasonName = "none";
+void onStaDisconnectedForDiagnostics(arduino_event_id_t, arduino_event_info_t info) {
+  const int reason = static_cast<int>(info.wifi_sta_disconnected.reason);
+  g_lastStaDisconnectReason = reason ? reason : 1;  // reason 0 crashes name lookup
+  g_lastStaDisconnectReasonName = WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(g_lastStaDisconnectReason));
+}
+
 // Arduino's WebServer retains parsed request arguments until the next request.
 // For JSON POSTs, that includes the complete "plain" body. Expose a narrowly
 // scoped release operation so large request bodies do not remain resident
@@ -375,13 +389,55 @@ void CrossPointWebServer::begin() {
     return;
   }
 
+  // Install the disconnect-reason probe exactly once per process.
+  static bool sReasonProbeInstalled = false;
+  if (!sReasonProbeInstalled) {
+    WiFi.onEvent(onStaDisconnectedForDiagnostics, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    sReasonProbeInstalled = true;
+  }
+
   // Check if we have a valid network connection (either STA connected or AP mode)
   const wifi_mode_t wifiMode = WiFi.getMode();
-  const bool isStaConnected = (wifiMode & WIFI_MODE_STA) && (WiFi.status() == WL_CONNECTED);
+  const bool staEnabled = (wifiMode & WIFI_MODE_STA) != 0;
+  bool isStaConnected = staEnabled && (WiFi.status() == WL_CONNECTED);
+
+  // b65-s3c-pf9e problem A (P0): after a successful GOT_IP (connectEvent evt=3)
+  // the WiFi-transfer entry calls WifiSelectionActivity::onExit(), whose
+  // WiFi.scanDelete() can leave WiFi.status() transiently reading 6
+  // (WL_DISCONNECTED) for ~100 ms even though the STA association is intact.
+  // The old one-shot check read that stale 6 and refused to start the server,
+  // which then triggered the unconditional reboot in onExit(). Poll up to
+  // 3 s at 500 ms, logging every sample, and accept the FIRST WL_CONNECTED.
+  // This is defensive: a genuine "never connected" simply exhausts the window.
+  if (staEnabled && !isStaConnected) {
+    constexpr int kStatusPolls = 6;            // 6 * 500 ms = 3 s
+    constexpr unsigned long kStatusPollMs = 500;
+    for (int poll = 1; poll <= kStatusPolls && !isStaConnected; ++poll) {
+      delay(kStatusPollMs);
+      const wl_status_t sampled = WiFi.status();
+      LOG_DBG("WEB", "P0 status retry %d/%d: status=%d", poll, kStatusPolls, static_cast<int>(sampled));
+      if (sampled == WL_CONNECTED) {
+        isStaConnected = true;
+        LOG_INF("WEB", "P0 status retry: link recovered at poll %d (status=3)", poll);
+      }
+    }
+    // scanDelete()/stale-cache defence: nudge the driver to refresh status once
+    // more after the window. reconnect() is a no-op when already associated.
+    if (!isStaConnected) {
+      WiFi.reconnect();
+      LOG_DBG("WEB", "P0 status retry: issued WiFi.reconnect() fallback; final status=%d",
+              static_cast<int>(WiFi.status()));
+    }
+  }
+
   const bool isInApMode = (wifiMode & WIFI_MODE_AP) && (WiFi.softAPgetStationNum() >= 0);  // AP is running
 
   if (!isStaConnected && !isInApMode) {
-    LOG_DBG("WEB", "Cannot start webserver - no valid network (mode=%d, status=%d)", wifiMode, WiFi.status());
+    // Disconnect reason code is captured by the STA-disconnected event handler
+    // (g_lastStaDisconnectReason / g_lastStaDisconnectReasonName below), so the
+    // next field run can tell "never connected" from "connected then dropped".
+    LOG_DBG("WEB", "Cannot start webserver - no valid network (mode=%d, status=%d, reason=%d %s)", wifiMode,
+            static_cast<int>(WiFi.status()), g_lastStaDisconnectReason, g_lastStaDisconnectReasonName);
     return;
   }
 

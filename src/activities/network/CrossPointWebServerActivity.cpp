@@ -370,6 +370,24 @@ void CrossPointWebServerActivity::startAccessPoint() {
 void CrossPointWebServerActivity::startWebServer() {
   LOG_DBG("WEBACT", "Starting web server...");
 
+  // b65-s3c-pf9e problem A (P0): WifiSelectionActivity::onExit() calls
+  // WiFi.scanDelete() right after GOT_IP; on some core versions the STA status
+  // reads a stale WL_DISCONNECTED(6) for ~100 ms afterwards. Wait up to 3 s
+  // (500 ms steps), logging every sample, before handing off to begin().
+  // begin() carries an identical guard, so this layer is belt-and-braces.
+  if (!isApMode) {
+    constexpr int kPolls = 6;
+    constexpr unsigned long kStepMs = 500;
+    wl_status_t st = WiFi.status();
+    for (int poll = 1; poll <= kPolls && st != WL_CONNECTED; ++poll) {
+      LOG_DBG("WEBACT", "P0 pre-begin status poll %d/%d: status=%d", poll, kPolls, static_cast<int>(st));
+      if (st == WL_CONNECTED) break;
+      delay(kStepMs);
+      st = WiFi.status();
+    }
+    LOG_DBG("WEBACT", "P0 pre-begin final status=%d (3 = WL_CONNECTED)", static_cast<int>(st));
+  }
+
   // Repeat the release right before the allocation: the WiFi selection screen
   // rendered since onEnter(), and a CJK SSID repopulates the SD-font caches.
   if (auto* fcm = renderer.getFontCacheManager()) {
@@ -413,7 +431,32 @@ void CrossPointWebServerActivity::startWebServer() {
   } else {
     LOG_ERR("WEBACT", "ERROR: Failed to start web server!");
     webServer.reset();
-    // Go back on error
+
+    // b65-s3c-pf9e problem D: in WiFi-transfer mode a failed server start must
+    // NOT fall through to the home/exit path, whose WIFI_TRANSFER_ACTIVE()
+    // branch commits boot_mode=NORMAL and reboots. Instead stay on the WiFi
+    // selection page with a retry hint so the user can pick again or return.
+    // The reboot is reserved for the user's explicit Done/exit later.
+    if (WIFI_TRANSFER_ACTIVE() && !isApMode) {
+      LOG_INF("WEBACT", "P1 server start failed in WiFi-transfer mode: staying on WiFi selection for retry (no reboot)");
+      state = WebServerActivityState::WIFI_SELECTION;
+      startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput,
+                                                                     /*autoConnect=*/true,
+                                                                     /*retryHintOnEnter=*/true),
+                             [this](const ActivityResult& result) {
+                               if (!result.isCancelled) {
+                                 const auto& wifi = std::get<WifiResult>(result.data);
+                                 connectedIP = wifi.ip;
+                                 connectedSSID = wifi.ssid;
+                                 onWifiSelectionComplete(true);
+                               } else {
+                                 onWifiSelectionComplete(false);
+                               }
+                             });
+      return;
+    }
+
+    // Non-WiFi-transfer modes keep the original back-on-error behaviour.
     onGoHome();
   }
 }

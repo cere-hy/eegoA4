@@ -91,6 +91,12 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   // Whether to attempt auto-connect on entry
   const bool allowAutoConnect;
 
+  // b65-s3c-pf9e problem D: when the parent's web server failed to start after
+  // an ostensibly successful join, re-enter this page showing a one-shot
+  // "connection failed, retry" hint instead of auto-connecting again. Suppresses
+  // auto-connect so the user is left on the network list / retry prompt.
+  const bool retryHintOnEnter;
+
   // Whether we are attempting to auto-connect or auto-scan saved networks.
   bool autoConnecting = false;
 
@@ -147,7 +153,8 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   void onComplete(bool connected);
 
  public:
-  explicit WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool autoConnect = true);
+  explicit WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool autoConnect = true,
+                                 bool retryHintOnEnter = false);
   void onEnter() override;
   void onExit() override;
   void loop() override;
