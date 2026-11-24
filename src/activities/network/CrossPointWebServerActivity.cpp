@@ -512,15 +512,16 @@ void CrossPointWebServerActivity::startWebServer() {
 
 void CrossPointWebServerActivity::loop() {
   // b65-s3c-pf9d clause 11: an idle WiFi-transfer session auto-returns to
-  // NORMAL after 10 minutes of no physical input. A plain reboot restores a
-  // pristine NORMAL heap; esp_wifi_deinit() is deliberately not called.
+  // NORMAL after 30 minutes (b65-s3c-pf9j, was 10) of no physical input.
+  // A plain reboot restores a pristine NORMAL heap; esp_wifi_deinit() is
+  // deliberately not called.
   if (WIFI_TRANSFER_ACTIVE() && state == WebServerActivityState::SERVER_RUNNING && wifiSessionStartedAt != 0) {
     if (gpio.rawInputActive()) {
       wifiSessionStartedAt = millis();  // user is present — restart the idle clock
     }
     if ((millis() - wifiSessionStartedAt) >= WIFI_IDLE_RESTART_MS) {
       webServer.reset();  // flush/close any in-flight file before reboot
-      LOG_INF("WIFI", "wifi-transfer idle 10 min: boot_mode=NORMAL; restarting");
+      LOG_INF("WIFI", "wifi-transfer idle 30 min: boot_mode=NORMAL; restarting");
       bootmode::set(bootmode::Mode::NORMAL);
       esp_restart();
       return;

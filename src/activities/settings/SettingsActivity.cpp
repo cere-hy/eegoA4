@@ -143,7 +143,11 @@ void SettingsActivity::rebuildSettings() {
   addAction(SettingsSection::General, StrId::STR_LANGUAGE, SettingAction::Language);
   addAction(SettingsSection::General, StrId::STR_KEYBOARD_LAYOUTS, SettingAction::KeyboardLayouts);
   addAction(SettingsSection::Reader, StrId::STR_TEXT_SETTINGS, SettingAction::TextSettings);
-  addAction(SettingsSection::Reader, StrId::STR_MANAGE_FONTS, SettingAction::DownloadFonts);
+  // b65-s3c-pf9j: MANAGE_FONTS (FontDownloadActivity) is a pure network
+  // download page (WiFi selection + fonts.json manifest + .cpfont download);
+  // it has no local-font switching UI (that lives in TextSettings > Family).
+  // With no network in the field the row is dead, so the entry is removed.
+  // The enum value, its switch case and the Activity remain compiled.
   if (section == SettingsSection::Controls) {
     if (controlsGroup == ControlsGroup::Root) {
       if (BoardConfig::hasHomeKey()) {
@@ -194,17 +198,12 @@ void SettingsActivity::rebuildSettings() {
   addAction(SettingsSection::Reader, StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar);
   addAction(SettingsSection::Reader, StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache);
 
-  addAction(SettingsSection::Network, StrId::STR_WIFI_NETWORKS, SettingAction::Network);
-  // b65-s3c-pf9e problem B: WiFi Transfer entry moved here from Home (which
-  // overflowed its fixed 5-row layout). Semantically it is a connectivity
-  // feature, so Settings > Connectivity is its natural home.
+  // b65-s3c-pf9j: Connectivity section trimmed to the only working entry.
+  // Wi-Fi Networks / BT page turner / CrossPoint sync / OPDS / Plugins all
+  // require a network (or a remote peripheral) that is absent in the field;
+  // their rows are removed but SettingAction enum values, switch cases,
+  // Activities and i18n keys all remain compiled. WifiTransfer stays.
   addAction(SettingsSection::Network, StrId::STR_MODE_WIFI_TITLE, SettingAction::WifiTransfer);
-  if (bleturner::status().compiledIn) {
-    addAction(SettingsSection::Network, StrId::STR_BT_PAGE_TURNER, SettingAction::Bluetooth);
-  }
-  addAction(SettingsSection::Network, StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync);
-  addAction(SettingsSection::Network, StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser);
-  addAction(SettingsSection::Network, StrId::STR_PLUGINS, SettingAction::Plugins);
 
   // OTA fetches this board's own release asset (see OtaUpdater); boards whose
   // asset isn't published yet just report no update available. The Picco's
@@ -417,12 +416,8 @@ void SettingsActivity::toggleSelectedSetting() {
           LOG_ERR("SETTINGS", "OOM: ClockSettingsActivity");
         }
         break;
-      case SettingAction::KOReaderSync:
-        startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::OPDSBrowser:
-        startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
-        break;
+      // b65-s3c-pf9j: KOReaderSync / OPDSBrowser cases removed — entries gone.
+      // Enum values + Activities remain compiled; no enum reordering.
       case SettingAction::WifiTransfer: {
         // b65-s3c-pf9e problem B: arm the one-shot WIFI boot flag and restart,
         // exactly as the old Home entry did. A software restart yields ESP_RST_SW,
@@ -434,50 +429,11 @@ void SettingsActivity::toggleSelectedSetting() {
         esp_restart();
         break;
       }
-      case SettingAction::Network: {
-        // b65-s3c-pf9e problem C: while a WiFi-transfer session is active, the
-        // legacy "Wi-Fi Networks" credential row must NOT open the old
-        // standalone WifiSelection path (which leaves BLE running and later
-        // collides with WiFi on memory). Redirect it into the lightweight
-        // WiFi-transfer flow instead.
-        if (WIFI_TRANSFER_ACTIVE()) {
-          LOG_INF("SETTINGS", "problem C: WiFi-transfer active; redirecting Wi-Fi Networks row to WiFi Transfer");
-          SETTINGS.saveToFile();
-          APP_STATE.saveToFile();
-          bootmode::set(bootmode::Mode::WIFI);
-          esp_restart();
-          break;
-        }
-        auto activity = makeUniqueNoThrow<WifiSelectionActivity>(renderer, mappedInput, false);
-        if (!activity) {
-          LOG_ERR("SETTINGS", "OOM: WifiSelectionActivity");
-          return;
-        }
-        startActivityForResult(std::move(activity), [](const ActivityResult&) {
-          SETTINGS.saveToFile();
-          // Every other WiFi consumer hands the radio to a session it owns;
-          // these rows only save credentials, so nothing here would ever
-          // release the driver's heap. The scan alone brings it up, so tear
-          // down whether or not the user joined a network.
-          if (WiFi.getMode() == WIFI_MODE_NULL) return;
-          WiFi.disconnect(false);
-          delay(30);
-          // Unlike the onExit() teardowns, this runs from the loop task with
-          // no lock held; the restart popup paints straight to the panel.
-          RenderLock lock;
-          silentRestartToSettings();
-        });
-        break;
-      }
-      case SettingAction::Bluetooth: {
-        auto activity = makeUniqueNoThrow<BleSettingsActivity>(renderer, mappedInput);
-        if (!activity) {
-          LOG_ERR("SETTINGS", "OOM: BleSettingsActivity");
-          return;
-        }
-        startActivityForResult(std::move(activity), resultHandler);
-        break;
-      }
+      // b65-s3c-pf9j: Network (Wi-Fi Networks) and Bluetooth (BT page turner)
+      // cases removed — entries gone. WifiSelectionActivity is NOT deleted:
+      // it is still launched by the WiFi-transfer flow (this WifiTransfer
+      // case boots into it via boot_mode) and by CrossPointWebServerActivity.
+      // Enum values + Activities remain compiled; no enum reordering.
       case SettingAction::ClearCache:
         startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
         break;
@@ -504,13 +460,8 @@ void SettingsActivity::toggleSelectedSetting() {
       case SettingAction::SdFirmwareUpdate:
         startActivityForResult(std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput), resultHandler);
         break;
-      case SettingAction::DownloadFonts:
-        startActivityForResult(std::make_unique<FontDownloadActivity>(renderer, mappedInput),
-                               [this](const ActivityResult&) {
-                                 SETTINGS.saveToFile();
-                                 rebuildSettings();
-                               });
-        break;
+      // b65-s3c-pf9j: DownloadFonts case removed — entry gone.
+      // Enum value + FontDownloadActivity remain compiled; no enum reordering.
       case SettingAction::TextSettings:
         startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
                                                                       TextSettingsActivity::Tab::Family),
@@ -529,21 +480,9 @@ void SettingsActivity::toggleSelectedSetting() {
                                  rebuildSettings();
                                });
         break;
-      case SettingAction::Plugins: {
-        static constexpr StrId OPTIONS[] = {StrId::STR_ENABLED, StrId::STR_DISABLED, StrId::STR_CANCEL};
-        optionPopup.show(StrId::STR_PLUGINS, OPTIONS, 3, SETTINGS.pluginsEnabled ? 0 : 1, [this](const int idx) {
-          if (idx == 2) return;
-          SETTINGS.pluginsEnabled = idx == 0 ? 1 : 0;
-          // Turning plugins on brings back a dismissed Plugin Hub install row.
-          if (SETTINGS.pluginsEnabled) SETTINGS.pluginHubPromptHidden = 0;
-          SETTINGS.saveToFile();
-          // Applies to event delivery now, not after a reboot.
-          pluginevents::refreshSubscriptions();
-          rebuildSettings();
-        });
-        requestUpdate();
-        return;
-      }
+      // b65-s3c-pf9j: Plugins case removed — entry gone. Enum value remains
+      // compiled; no enum reordering. (settingValueText still tolerates the
+      // value; no menu row can reach it now.)
       case SettingAction::KeyboardLayouts:
         if (auto activity = makeUniqueNoThrow<KeyboardLayoutsActivity>(renderer, mappedInput)) {
           startActivityForResult(std::move(activity), nullptr);

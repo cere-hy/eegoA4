@@ -58,8 +58,10 @@ class CrossPointWebServerActivity final : public Activity {
 
   // b65-s3c-pf9d clause 11: auto-return to NORMAL after an idle WiFi-transfer
   // session. The timer starts when the web server comes up.
+  // b65-s3c-pf9j: 10 min -> 30 min (1800000 ms); this constant is used ONLY by
+  // the WiFi-transfer SERVER_RUNNING idle loop, not any reader/sleep timeout.
   unsigned long wifiSessionStartedAt = 0;
-  static constexpr unsigned long WIFI_IDLE_RESTART_MS = 10UL * 60UL * 1000UL;
+  static constexpr unsigned long WIFI_IDLE_RESTART_MS = 30UL * 60UL * 1000UL;  // 1800000 ms
 
   // Cached signal-strength bracket (0..4) for the WiFi indicator.
   int lastWifiBars = 0;
