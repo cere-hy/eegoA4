@@ -82,6 +82,7 @@ void WifiSelectionActivity::onPromptEvent(const fui::ActionEvent& event, void* u
       RenderLock lock(*self);
       WIFI_STORE.addCredential(self->selectedSSID, self->enteredPassword);
     }
+    self->linkHandedOver = true;  // pf9i: 链路已移交，退出时保留 WiFi
     self->onComplete(true);
     return;
   }
@@ -162,6 +163,7 @@ void WifiSelectionActivity::onEnter() {
   savePromptSelection = 0;
   forgetPromptSelection = 0;
   autoConnecting = false;
+  linkHandedOver = false;  // pf9i: every entry starts clean; guards "failed-then-success" retry chains
   manualNetworkListRequested = false;
   autoAttemptedSsids.clear();
   const size_t savedCredentialCount = WIFI_STORE.getCredentialCount();
@@ -236,12 +238,14 @@ void WifiSelectionActivity::onExit() {
   // b65-s3c-pf9b-2: mid-exit while a connection is in flight — cancel it and
   // restore BLE. Parent still owns the established-connection state, so we only
   // abort an in-progress attempt (not a successful join).
-  // b65-s3c-pf9h: NOTE — on the successful saved/open path `state` is left as
-  // CONNECTING, so this guard is entered even though the join succeeded. That
-  // makes WiFi.disconnect() a prime suspect for the vanishing IP; the probe
-  // before/after confirms it.  Behaviour is intentionally UNCHANGED this batch
-  // (observation only) — the fix is deferred to pf9i after the slice.
-  if (state == WifiSelectionState::CONNECTING || state == WifiSelectionState::AUTO_CONNECTING) {
+  // b65-s3c-pf9h proved: on the successful saved/open route `state` is left as
+  // CONNECTING (only autoConnecting was cleared), so the old state-only guard
+  // fired WiFi.disconnect() right after GOT_IP — the vanishing-IP root cause.
+  // b65-s3c-pf9i (P0 fix): hand link ownership via `linkHandedOver` instead of
+  // mutating `state` (20+ render/loop consumers — pollution risk). Keep the
+  // `state == CONNECTING` second condition so non-connecting exits behave
+  // exactly as before; a user Back / failed join still disconnects.
+  if (!linkHandedOver && state == WifiSelectionState::CONNECTING) {
     wifi_ip_probe::emit("ws_before_disconnect");
     WiFi.disconnect();
     wifi_ip_probe::emit("ws_after_disconnect");
@@ -629,7 +633,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
       snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
       logPrintf("INF", "WIFI", "[WIFI] pf9h ip-trail status=%d localIP=%s", static_cast<int>(status), ipStr);
     }
-    wifi_ip_probe::emit("ws_gotip_check");
+    wifi_ip_probe::emit("ws_gotip_check", "DBG");  // pf9i: constant-on-success, demote from INF
 
     if (ip == IPAddress(0, 0, 0, 0)) {
       // GOT_IP asserted (status==3) but no usable address yet.  Do NOT pop;
@@ -698,7 +702,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
     // b65-s3c-pf9h: last in-page sample before the activity pops.  If the IP
     // is still present here but gone at ws_onexit_*, the loss is inside
     // onExit()/the completion callback/MDNS.begin().
-    wifi_ip_probe::emit("ws_before_complete");
+    wifi_ip_probe::emit("ws_before_complete", "DBG");  // pf9i: constant-on-success, demote from INF
 
     // If we entered a new password, ask if user wants to save it
     // Otherwise, immediately complete so parent can start web server
@@ -711,6 +715,7 @@ void WifiSelectionActivity::checkConnectionStatus() {
       LOG_DBG("WIFI",
               "Connected with saved/open credentials, "
               "completing immediately");
+      linkHandedOver = true;  // pf9i: 链路已移交，退出时保留 WiFi
       onComplete(true);
     }
     return;
@@ -832,9 +837,11 @@ void WifiSelectionActivity::loop() {
         WIFI_STORE.addCredential(selectedSSID, enteredPassword);
       }
       // Complete - parent will start web server
+      linkHandedOver = true;  // pf9i: 链路已移交，退出时保留 WiFi
       onComplete(true);
     } else if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
       // Skip saving, complete anyway
+      linkHandedOver = true;  // pf9i: 链路已移交，退出时保留 WiFi
       onComplete(true);
     }
     return;
@@ -885,6 +892,7 @@ void WifiSelectionActivity::loop() {
   // completes immediately)
   if (state == WifiSelectionState::CONNECTED) {
     // Safety fallback - immediately complete
+    linkHandedOver = true;  // pf9i: 链路已移交，退出时保留 WiFi
     onComplete(true);
     return;
   }

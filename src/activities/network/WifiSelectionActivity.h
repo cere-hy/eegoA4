@@ -100,6 +100,13 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   // Whether we are attempting to auto-connect or auto-scan saved networks.
   bool autoConnecting = false;
 
+  // b65-s3c-pf9i: link ownership handed to the Web server on a successful
+  // join.  When true, onExit() must NOT tear WiFi down — the parent Web
+  // activity needs the live association/IP.  Kept separate from `state`
+  // (which has 20+ render/loop consumers) so a success never depends on a
+  // state mutation.  No underscore prefix, mirroring `autoConnecting`.
+  bool linkHandedOver = false;
+
   // True from the Confirm press that stops auto-connect until that button is released.
   bool manualNetworkListRequested = false;
 

@@ -650,8 +650,24 @@ void setup() {
       }
       if (id == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
         const int reason = static_cast<int>(info.wifi_sta_disconnected.reason);
-        logPrintf("INF", "WIFI", "[WIFI] arduino_evt=%d %s reason=%d localIP=%s",
-                  static_cast<int>(id), name, reason, WiFi.localIP().toString().c_str());
+        // b65-s3c-pf9i (P2, reason name backfill): the pf9h field log printed
+        // `reason=36` with no resolvable name.  The Arduino core table already
+        // maps 8/36/201, but this event stream logged the bare number only.
+        // Spell out the codes seen in the field (IDF esp_wifi_types_generic.h:
+        // 8=ASSOC_LEAVE, 36=STA_LEAVING, 201=NO_AP_FOUND); fall back to the
+        // core table for everything else.  NOTE: 12303 (0x300F) is
+        // ESP_ERR_WIFI_NOT_CONNECT, an ap_info return code, NOT a reason — it
+        // never appears in reason= and is reported separately as ap_info_rc.
+        const char* reasonName = "none";
+        switch (reason) {
+          case 0: reasonName = "none"; break;
+          case 8: reasonName = "ASSOC_LEAVE"; break;
+          case 36: reasonName = "STA_LEAVING"; break;
+          case 201: reasonName = "NO_AP_FOUND"; break;
+          default: reasonName = WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)); break;
+        }
+        logPrintf("INF", "WIFI", "[WIFI] arduino_evt=%d %s reason=%d %s localIP=%s",
+                  static_cast<int>(id), name, reason, reasonName, WiFi.localIP().toString().c_str());
       } else {
         logPrintf("INF", "WIFI", "[WIFI] arduino_evt=%d %s localIP=%s",
                   static_cast<int>(id), name, WiFi.localIP().toString().c_str());

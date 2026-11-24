@@ -43,12 +43,17 @@ inline IPAddress staNetifIp(esp_err_t* outRc = nullptr) {
   return ip;
 }
 
-inline void emit(const char* point) {
+// b65-s3c-pf9i (P2): `level` lets the two constant-on-success probes
+// (ws_gotip_check / ws_before_complete) be demoted to DBG so the success path
+// is not noisy; the two verdict probes (ws_before_disconnect /
+// ws_after_disconnect) and every other point stay INF.  Default INF keeps all
+// other call sites byte-for-byte identical in behaviour.
+inline void emit(const char* point, const char* level = "INF") {
   IPAddress local = WiFi.localIP();
   IPAddress netif = staNetifIp();
   wifi_ap_record_t apInfo{};
   const esp_err_t apRc = esp_wifi_sta_get_ap_info(&apInfo);
-  logPrintf("INF", "PROBE",
+  logPrintf(level, "PROBE",
             "[PROBE] %s localIP=%s status=%d netif_ip=%s ap_info_rc=%d",
             point, local.toString().c_str(), static_cast<int>(WiFi.status()),
             netif.toString().c_str(), static_cast<int>(apRc));
