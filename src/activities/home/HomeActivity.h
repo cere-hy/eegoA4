@@ -56,9 +56,8 @@ class HomeActivity final : public Activity {
     if (slot != HomeMenuItem::NONE && item == slot) return i;
     if (item == HomeMenuItem::PLUGINS) return 0;
     if (slot != HomeMenuItem::NONE) ++i;
-    // File Transfer also opens the OPDS browser, so it returns there without its slot.
-    if (item == HomeMenuItem::FILE_TRANSFER || item == HomeMenuItem::OPDS_BROWSER) return i;
-    ++i;
+    // b65-s3c-pf9k: FILE_TRANSFER row removed from Home. OPDS remains reachable
+    // via its slot above; Settings/PUSH each shift down one index.
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
     ++i;
     if (item == HomeMenuItem::PUSH) return i;  // S3: after Settings
@@ -73,7 +72,7 @@ class HomeActivity final : public Activity {
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
     if (idx == i++) return HomeMenuItem::LIBRARY;
     if (slot != HomeMenuItem::NONE && idx == i++) return slot;
-    if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
+    // b65-s3c-pf9k: FILE_TRANSFER removed; Settings/PUSH shift down one index.
     if (idx == i++) return HomeMenuItem::SETTINGS_MENU;
     if (idx == i++) return HomeMenuItem::PUSH;  // S3: after Settings
     if (idx == i) return HomeMenuItem::WIFI_TRANSFER;  // pf9d: last menu row

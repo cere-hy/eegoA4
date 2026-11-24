@@ -31,7 +31,7 @@
 #include <esp_system.h>
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 5;  // File Browser, Library, File transfer, Settings, PUSH (pf9e: WiFi Transfer entry moved to Settings > Connectivity)
+  int count = 4;  // pf9k: File Browser, Library, Settings, PUSH (File transfer row removed; its 5 modes are reached from Settings > Connectivity. WiFi Transfer already lives there since pf9e)
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -389,9 +389,8 @@ void HomeActivity::loop() {
       case HomeMenuItem::OPDS_BROWSER:
         onOpdsBrowserOpen();
         break;
-      case HomeMenuItem::FILE_TRANSFER:
-        onFileTransferOpen();
-        break;
+      // b65-s3c-pf9k: FILE_TRANSFER case removed — the row is gone from Home.
+      // Its entry lives in Settings > Connectivity (WiFi Transfer / USB Drive).
       case HomeMenuItem::SETTINGS_MENU:
         onSettingsOpen();
         break;
@@ -612,9 +611,12 @@ void HomeActivity::render(RenderLock&&) {
   // b65-s3c-pf9e problem B: the "WiFi Transfer" row was overflowing the fixed
   // Home menu layout. It now lives under Settings > Connectivity (Network),
   // which is also where it semantically belongs. Home stays at 5 rows.
-  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE), tr(STR_PUSH)};
-  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings, Push};
+  // b65-s3c-pf9k: the "File Transfer" row is gone from Home. Its five modes
+  // (Join Network / Calibre / Hotspot / OPDS / USB) are reached from
+  // Settings > Connectivity; WiFi Transfer has lived there since pf9e.
+  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_SETTINGS_TITLE),
+                                        tr(STR_PUSH)};
+  std::vector<UIIcon> menuIcons = {Folder, Library, Settings, Push};
 
   if (slotItem() != HomeMenuItem::NONE) {
     menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));

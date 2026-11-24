@@ -38,6 +38,7 @@ enum class SettingAction {
   ControlsSide,
   ControlsTouch,
   About,
+  UsbDrive,  // pf9k: appended at END (no reorder); USB Drive entry moved here from the removed File Transfer page
 };
 
 struct SettingInfo {

@@ -36,6 +36,7 @@
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
 #include "WifiTransferMode.h"
+#include "activities/network/UsbDriveActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
@@ -204,6 +205,11 @@ void SettingsActivity::rebuildSettings() {
   // their rows are removed but SettingAction enum values, switch cases,
   // Activities and i18n keys all remain compiled. WifiTransfer stays.
   addAction(SettingsSection::Network, StrId::STR_MODE_WIFI_TITLE, SettingAction::WifiTransfer);
+#if FREEINK_CAP_USB_MSC
+  // b65-s3c-pf9k: USB Drive row moved here from the removed File Transfer page.
+  // Reuses the existing STR_USB_DRIVE key; sits immediately after WiFi Transfer.
+  addAction(SettingsSection::Network, StrId::STR_USB_DRIVE, SettingAction::UsbDrive);
+#endif
 
   // OTA fetches this board's own release asset (see OtaUpdater); boards whose
   // asset isn't published yet just report no update available. The Picco's
@@ -429,6 +435,18 @@ void SettingsActivity::toggleSelectedSetting() {
         esp_restart();
         break;
       }
+      // b65-s3c-pf9k: USB Drive entry moved here from the removed File Transfer
+      // page. UsbDriveActivity itself is untouched; only its entry relocated.
+#if FREEINK_CAP_USB_MSC
+      case SettingAction::UsbDrive: {
+        if (auto activity = makeUniqueNoThrow<UsbDriveActivity>(renderer, mappedInput)) {
+          startActivityForResult(std::move(activity), nullptr);
+        } else {
+          LOG_ERR("SETTINGS", "OOM: UsbDriveActivity");
+        }
+        break;
+      }
+#endif
       // b65-s3c-pf9j: Network (Wi-Fi Networks) and Bluetooth (BT page turner)
       // cases removed — entries gone. WifiSelectionActivity is NOT deleted:
       // it is still launched by the WiFi-transfer flow (this WifiTransfer
