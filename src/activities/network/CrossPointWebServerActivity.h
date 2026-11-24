@@ -66,6 +66,22 @@ class CrossPointWebServerActivity final : public Activity {
   // Cached signal-strength bracket (0..4) for the WiFi indicator.
   int lastWifiBars = 0;
 
+  // b65-s3c-pf9l: service-screen two-row action list (0 = switch network,
+  // 1 = end & exit). Cursor is moved with Up/Down or page keys, executed with
+  // Confirm. Both rows are rendered so the entry is discoverable, not hidden.
+  int serverActionCursor = 0;
+
+  // b65-s3c-pf9l: one-shot Weak-signal log throttle — log only on state change
+  // instead of every 2 s (field: 40+ lines in 379 s drowned other evidence).
+  bool lastWeakWarned = false;
+
+  // b65-s3c-pf9l: set while the no-reboot in-session network switch is active.
+  // Used only by the return path to avoid re-entering server init twice.
+  bool networkSwitchInProgress = false;
+
+  // b65-s3c-pf9l: guard so an in-flight exit confirmation cannot be stacked.
+  bool exitConfirmPending = false;
+
   void renderServerRunning() const;
   void renderWifiIndicator(int subHeaderTop) const;
 
@@ -73,6 +89,11 @@ class CrossPointWebServerActivity final : public Activity {
   void onWifiSelectionComplete(bool connected);
   void startAccessPoint();
   void startWebServer();
+
+  // b65-s3c-pf9l: in-session "change network" without reboot; see .cpp.
+  void startNetworkSwitch();
+  void onNetworkSwitchResult(const ActivityResult& result);
+  void requestExitWithConfirmation();
 
  public:
   explicit CrossPointWebServerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,

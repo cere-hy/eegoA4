@@ -25,6 +25,7 @@
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
 #include "activities/network/CalibreConnectActivity.h"
+#include "activities/util/ConfirmationActivity.h"  // b65-s3c-pf9l: Back exit confirmation
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/PluginEvents.h"
@@ -350,6 +351,112 @@ void CrossPointWebServerActivity::onWifiSelectionComplete(const bool connected) 
   }
 }
 
+// ---------------------------------------------------------------------------
+// b65-s3c-pf9l — in-session "change network" WITHOUT reboot.
+//
+// Root cause this closes: before pf9l the WiFi-transfer session had exactly one
+// exit (boot_mode=NORMAL + esp_restart). "I want a different network" was
+// therefore forced through "end the whole session", and on every reboot the
+// device auto-reconnected to the first saved credential (CMCC-A9CG), producing
+// the weak-signal dead loop. This path keeps boot_mode=WIFI the whole time.
+// ---------------------------------------------------------------------------
+void CrossPointWebServerActivity::startNetworkSwitch() {
+  LOG_INF("WEBACT", "pf9l: start in-session network switch (no reboot)");
+  state = WebServerActivityState::SHUTTING_DOWN;
+
+  // Tear the application layer down in the SAME safe order as onExit():
+  // DNS -> mDNS -> Web/WS server, then drop the station link.
+  // l1: MDNS.end() must precede the server stop.
+  stopDnsServer();
+  MDNS.end();
+  if (webServer) {
+    webServer->stop();   // closes WebSocket upload + server->stop() + delete internals
+    webServer.reset();   // delete the CrossPointWebServer instance (stop() is idempotent)
+  }
+  pluginevents::refreshSubscriptions();
+
+  // This disconnect is a DELIBERATE teardown that begins a new session. It is
+  // the no-arg form (wifioff=false, eraseap=false): NVS credentials are kept.
+  // It is semantically the OPPOSITE of pf9i's linkHandedOver guard, which
+  // protects a SUCCESSFUL handoff from an accidental disconnect — do not
+  // confuse the two calls, and do not change this to disconnect(true, true).
+  WiFi.disconnect();
+  LOG_INF("WEBACT", "pf9l: DNS/mDNS/WS stopped, WiFi.disconnect() done (credentials kept, boot_mode stays WIFI)");
+
+  networkSwitchInProgress = true;
+  state = WebServerActivityState::WIFI_SELECTION;
+
+  // autoConnect=false -> WifiSelectionActivity::allowAutoConnect=false, so it
+  // will NOT auto-reconnect the saved (poor) credential; the user must pick a
+  // network. retryHintOnEnter tells the user a switch is in progress.
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput,
+                                                                 /*autoConnect=*/false,
+                                                                 /*retryHintOnEnter=*/true),
+                         [this](const ActivityResult& result) { onNetworkSwitchResult(result); });
+}
+
+void CrossPointWebServerActivity::onNetworkSwitchResult(const ActivityResult& result) {
+  if (!result.isCancelled) {
+    // Reuse the pf9h/i-verified completion path verbatim; do NOT author a
+    // second server-init path for the switch (l3: re-enter startWebServer()).
+    const auto& wifi = std::get<WifiResult>(result.data);
+    connectedIP = wifi.ip;
+    connectedSSID = wifi.ssid;
+    networkSwitchInProgress = false;
+    LOG_INF("WEBACT", "pf9l: switch connected ssid=%s ip=%s; reusing startWebServer (no reboot)",
+            connectedSSID.c_str(), connectedIP.c_str());
+    onWifiSelectionComplete(true);
+    return;
+  }
+
+  // Cancelled inside the switch: never return to a half-state "server running"
+  // screen (server is down, IP is gone). Stay in the network list unless the
+  // user explicitly ends the session — no reboot on a plain Back.
+  LOG_INF("WEBACT", "pf9l: switch cancelled; prompting choose-network or end-session");
+  const std::string heading = tr(STR_PF9L_SWITCH_CANCEL_TITLE);
+  const std::string body = tr(STR_PF9L_SWITCH_CANCEL_BODY);
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body,
+                                              tr(STR_PF9L_CHOOSE_NETWORK), tr(STR_PF9L_END_SESSION)),
+      [this](const ActivityResult& r) {
+        if (r.isCancelled) {
+          // "Choose network" — re-enter the list, still no reboot.
+          state = WebServerActivityState::WIFI_SELECTION;
+          startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false, true),
+                                 [this](const ActivityResult& rr) { onNetworkSwitchResult(rr); });
+        } else {
+          // "End session" — reuse the existing exit path (boot_mode=NORMAL + restart).
+          networkSwitchInProgress = false;
+          onGoHome();
+        }
+      });
+}
+
+// ---------------------------------------------------------------------------
+// b65-s3c-pf9l — Back/Home now asks for confirmation before the existing
+// end-session reboot. Confirm -> onGoHome() (unchanged onExit reboot path, l4);
+// cancel -> stay in the session and do NOT touch the still-running server or
+// mDNS (l2: no startWebServer()/MDNS.begin() on the confirm-return path).
+// ---------------------------------------------------------------------------
+void CrossPointWebServerActivity::requestExitWithConfirmation() {
+  if (exitConfirmPending) return;
+  exitConfirmPending = true;
+  const std::string heading = tr(STR_PF9L_END_TITLE);
+  const std::string body = tr(STR_PF9L_END_BODY);
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body, tr(STR_CANCEL),
+                                              tr(STR_PF9L_END_RESTART)),
+      [this](const ActivityResult& result) {
+        exitConfirmPending = false;
+        if (result.isCancelled) {
+          leaveRequested = false;  // clear the upload-cancel latch so the confirm is not re-raised each chunk
+          requestUpdate();
+          return;
+        }
+        onGoHome();
+      });
+}
+
 void CrossPointWebServerActivity::startAccessPoint() {
   LOG_DBG("WEBACT", "Starting Access Point mode...");
   LOG_DBG("WEBACT", "Free heap before AP start: %d bytes", ESP.getFreeHeap());
@@ -567,8 +674,13 @@ void CrossPointWebServerActivity::loop() {
           consecutiveDisconnects = 0;
           firstDisconnectAt = 0;
           const int rssi = WiFi.RSSI();
-          if (rssi < -75) {
-            LOG_DBG("WEBACT", "Warning: Weak WiFi signal: %d dBm", rssi);
+          // b65-s3c-pf9l: log the weak-signal warning only when the weak/normal
+          // state flips (was every 2 s — 40+ lines in 379 s drowned field logs).
+          const bool weakNow = (rssi < -75);
+          if (weakNow != lastWeakWarned) {
+            lastWeakWarned = weakNow;
+            if (weakNow) LOG_DBG("WEBACT", "Warning: Weak WiFi signal: %d dBm", rssi);
+            else LOG_DBG("WEBACT", "WiFi signal recovered: %d dBm", rssi);
           }
           const int bars = barsForRssi(rssi, lastWifiBars);
           if (bars != lastWifiBars) {
@@ -598,7 +710,7 @@ void CrossPointWebServerActivity::loop() {
       for (int i = 0; i < MAX_ITERATIONS && webServer->isRunning(); i++) {
         webServer->handleClient();
         if (leaveRequested) {
-          onGoHome();
+          requestExitWithConfirmation();  // pf9l: Back/Home during upload now confirms before the reboot
           return;
         }
         // Reset watchdog every 32 iterations
@@ -613,7 +725,7 @@ void CrossPointWebServerActivity::loop() {
           // Home remains available now; other configured actions are deferred
           // to the next main-loop pass.
           if (mappedInput.wasReleased(MappedInputManager::Button::Back) || mappedInput.wasHomeGesture()) {
-            onGoHome();
+            requestExitWithConfirmation();  // pf9l: confirm before end-session reboot
             return;
           }
         }
@@ -621,10 +733,33 @@ void CrossPointWebServerActivity::loop() {
       lastHandleClientTime = millis();
     }
 
-    // Also check outside the request-processing loop.
-    if (mappedInput.wasReleased(MappedInputManager::Button::Back) || mappedInput.wasHomeGesture()) {
-      onGoHome();
-      return;
+    // b65-s3c-pf9l: service-screen two-row navigation.
+    // Up/Down (or Left/Right) move the visible cursor; Confirm executes the
+    // selected row. Back/Home is the confirmed end-session exit. Navigation is
+    // handled here, outside the blocking handleClient() loop, so an upload is
+    // never interrupted by a cursor move.
+    if (state == WebServerActivityState::SERVER_RUNNING &&
+        (!webServer || !webServer->isRunning())) {
+      const bool moved = mappedInput.wasPressed(MappedInputManager::Button::Down) ||
+                         mappedInput.wasPressed(MappedInputManager::Button::Right);
+      const bool movedUp = mappedInput.wasPressed(MappedInputManager::Button::Up) ||
+                           mappedInput.wasPressed(MappedInputManager::Button::Left);
+      if (moved || movedUp) {
+        serverActionCursor = moved ? 1 : 0;
+        requestUpdate();
+      }
+      if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+        if (serverActionCursor == 0) {
+          startNetworkSwitch();
+        } else {
+          requestExitWithConfirmation();
+        }
+        return;
+      }
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back) || mappedInput.wasHomeGesture()) {
+        requestExitWithConfirmation();  // pf9l: confirm before end-session reboot
+        return;
+      }
     }
   }
 }
@@ -644,8 +779,22 @@ void CrossPointWebServerActivity::render(RenderLock&&) {
                    nullptr);
 
     if (state == WebServerActivityState::SERVER_RUNNING) {
+      // b65-s3c-pf9l: surface signal strength on-device (was log-only). The
+      // user who needs to see a weak link is exactly the one who cannot read
+      // the serial log. STA + WiFi-transfer mode only.
+      std::string subHeaderText = connectedSSID;
+      if (WIFI_TRANSFER_ACTIVE() && !isApMode && WiFi.status() == WL_CONNECTED) {
+        const int rssi = WiFi.RSSI();
+        char rssiBuf[40];
+        if (rssi < -75) {
+          snprintf(rssiBuf, sizeof(rssiBuf), "  (%d dBm %s)", rssi, tr(STR_PF9L_WEAK_SIGNAL));
+        } else {
+          snprintf(rssiBuf, sizeof(rssiBuf), "  (%d dBm)", rssi);
+        }
+        subHeaderText += rssiBuf;
+      }
       GUI.drawSubHeader(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight},
-                        connectedSSID.c_str());
+                        subHeaderText.c_str());
       renderServerRunning();
     } else {
       const auto height = renderer.getLineHeight(UI_10_FONT_ID);
@@ -727,9 +876,24 @@ void CrossPointWebServerActivity::renderServerRunning() const {
   }
 
   if (WIFI_TRANSFER_ACTIVE()) {
+    // b65-s3c-pf9l: two visible, selectable action rows. The change-network
+    // entry must be discoverable without prior knowledge — a hidden key
+    // binding would repeat the "capability exists, user cannot see it" bug of
+    // the old log-only weak-signal warning. Up/Down move the cursor, Confirm
+    // executes; the '>' marker makes the current row unambiguous.
+    const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
+    const int hintY = renderer.getScreenHeight() - renderer.getLineHeight(SMALL_FONT_ID) - 20;
+    const int exitRowY = hintY - lineH - metrics.verticalSpacing;
+    const int switchRowY = exitRowY - lineH - metrics.verticalSpacing;
+
+    char rowBuf[96];
+    snprintf(rowBuf, sizeof(rowBuf), "%s %s", serverActionCursor == 0 ? ">" : " ", tr(STR_PF9L_CHANGE_NETWORK));
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, switchRowY, rowBuf);
+    snprintf(rowBuf, sizeof(rowBuf), "%s %s", serverActionCursor == 1 ? ">" : " ", tr(STR_PF9L_END_SESSION));
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, exitRowY, rowBuf);
+
     // b65-s3c-pf9d: fixed hint under the transfer page — push is paused for the
     // whole session; completing the transfer reboots back to NORMAL mode.
-    const int hintY = renderer.getScreenHeight() - renderer.getLineHeight(SMALL_FONT_ID) - 20;
     renderer.drawCenteredText(SMALL_FONT_ID, hintY, tr(STR_MODE_WIFI_HINT), true);
   }
 
