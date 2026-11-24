@@ -88,7 +88,10 @@ namespace {
 // v77: S3cPF8d — CJK adjacent-whitespace cleaning now absorbs spaces between
 //      Han characters (buffer-independent left neighbour). Old cached pages were
 //      built with the pre-clean word boundaries and must be rebuilt.
-constexpr uint8_t SECTION_FILE_VERSION = 77;
+// v78: S3cPF9m — the justify single-gap cap is now CJK-only; Latin lines go back
+//      to upstream's uncapped stretch. Pages built under the all-script cap carry
+//      flush-left Latin lines and must be rebuilt.
+constexpr uint8_t SECTION_FILE_VERSION = 78;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

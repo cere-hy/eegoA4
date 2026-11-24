@@ -158,6 +158,43 @@ int computeJustifyExtra(const int spareSpace, const size_t gapCount, const int m
   return perGap;
 }
 
+// S3cPF9m: script gate for the justify cap above. The cap exists because CJK
+// lines have dozens of zero-width gaps, so a line with only a few glyphs can
+// stretch one gap past half an em. Latin lines have the opposite geometry:
+// 3-6 gaps share the whole spare space, so the same half-em threshold trips on
+// ordinary English lines and silently turns them flush-left — the mixed
+// alignment (some lines reaching the right margin, some stopping short) that
+// upstream's uncapped stretch was written to avoid. Enable the cap only when
+// the line actually contains CJK/kana codepoints.
+//
+// Ranges: Han Unified + Compatibility, CJK Symbols and Punctuation (、。〈〉 and
+// the ideographic space), Hiragana + Katakana. Extension A/B+ are not listed:
+// the built-in faces used for reading do not ship them, and a codepoint outside
+// these ranges simply keeps the upstream uncapped behavior (fail-open).
+constexpr bool isCjkJustifyCodePoint(const uint32_t cp) {
+  return (cp >= 0x4E00 && cp <= 0x9FFF) ||   // CJK Unified Ideographs
+         (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK Compatibility Ideographs
+         (cp >= 0x3000 && cp <= 0x303F) ||   // CJK Symbols and Punctuation
+         (cp >= 0x3040 && cp <= 0x30FF);     // Hiragana + Katakana
+}
+
+// Line-level decision (not per-gap): the cap is a single scalar applied to the
+// whole line, so it must be on or off for the line as a whole. One CJK codepoint
+// is enough. Per-gap enablement would require splitting spareSpace/gapCount into
+// a per-gap array, i.e. rewriting the justify core — out of scope for this fix.
+bool lineHasCjkCodePoint(const std::vector<std::string>& words) {
+  for (const auto& word : words) {
+    const auto* ptr = reinterpret_cast<const unsigned char*>(word.data());
+    const auto* const end = ptr + word.size();
+    while (ptr < end) {
+      const uint32_t cp = utf8NextCodepoint(&ptr);
+      if (cp == 0) break;
+      if (isCjkJustifyCodePoint(cp)) return true;
+    }
+  }
+  return false;
+}
+
 // Removes every soft hyphen in-place so rendered glyphs match measured widths.
 void stripSoftHyphensInPlace(std::string& word) {
   size_t pos = 0;
@@ -1564,8 +1601,12 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
   // Non-positive result leaves legacy uncapped behavior. isLastLine already
   // excludes the paragraph末行 AND the line before a hard break (<br> flushes
   // its block via makePages(true)), so no separate hard-break check is needed.
+  // S3cPF9m: the cap is CJK-only. Latin lines pass 0 so they keep upstream's
+  // uncapped stretch (a half-em cap tripped on ordinary English lines and left
+  // them flush-left, mixing justified and ragged lines inside one paragraph).
   const int emPixels = renderer.getFontAscenderSize(fontId);
-  const int maxJustifyGap = emPixels > 0 ? emPixels / 2 : 0;
+  const bool lineHasCjk = lineHasCjkCodePoint(lineWords);
+  const int maxJustifyGap = (emPixels > 0 && lineHasCjk) ? emPixels / 2 : 0;
   const int justifyExtra = (effectiveAlignment == CssTextAlign::Justify && !isLastLine)
                                ? computeJustifyExtra(spareSpace, actualGapCount, maxJustifyGap)
                                : 0;
@@ -1652,6 +1693,9 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
 
     const int reorderedSpare =
         effectivePageWidth - extraStartOffset - extraEndOffset - reorderedWordWidthSum - reorderedNaturalGaps;
+    // S3cPF9m: maxJustifyGap is computed once for this line (from lineWords, in
+    // logical order) and reused here, so the RTL path inherits the same CJK-only
+    // gating — a visual reorder does not change which codepoints the line holds.
     const int reorderedJustifyExtra = (effectiveAlignment == CssTextAlign::Justify && !isLastLine)
                                           ? computeJustifyExtra(reorderedSpare, reorderedGapCount, maxJustifyGap)
                                           : 0;
