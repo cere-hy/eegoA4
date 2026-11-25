@@ -66,11 +66,6 @@ class CrossPointWebServerActivity final : public Activity {
   // Cached signal-strength bracket (0..4) for the WiFi indicator.
   int lastWifiBars = 0;
 
-  // b65-s3c-pf9l: service-screen two-row action list (0 = switch network,
-  // 1 = end & exit). Cursor is moved with Up/Down or page keys, executed with
-  // Confirm. Both rows are rendered so the entry is discoverable, not hidden.
-  int serverActionCursor = 0;
-
   // b65-s3c-pf9l: one-shot Weak-signal log throttle — log only on state change
   // instead of every 2 s (field: 40+ lines in 379 s drowned other evidence).
   bool lastWeakWarned = false;
@@ -82,32 +77,27 @@ class CrossPointWebServerActivity final : public Activity {
   // b65-s3c-pf9l: guard so an in-flight exit confirmation cannot be stacked.
   bool exitConfirmPending = false;
 
-  // b65-s3c-pf9l2: service-screen two-row navigation.
-  // Guard lifted to a pure predicate so host assertions can prove reachability
-  // (SERVER_RUNNING + live server => navigate). pf9l wrote the condition as
-  // (!webServer || !isRunning()), which skipped the whole block precisely while
-  // the server was serving — the root cause of both dead keys and dead touch.
-  // Original intent: do not process service-screen input until the server is
-  // actually up; keep that intent by requiring a live server here.
-  static bool serviceNavInputEnabled(WebServerActivityState state, bool serverPresent, bool serverRunning) {
-    return state == WebServerActivityState::SERVER_RUNNING && serverPresent && serverRunning;
-  }
-
-  // b65-s3c-pf9l2: per-frame snapshot of "an upload is in flight", sampled once
-  // at the top of loop(). Render (grey-out) and Confirm dispatch both read this
-  // same value so the row cannot look grey yet still execute on press.
+  // b65-s3c-pf9l2b: per-frame snapshot of "an upload is in flight", sampled
+  // once at the top of loop(). Grey-out and the Confirm gate read this same
+  // value so the button cannot look dimmed yet still execute on press.
   bool uploadingNow = false;
 
-  // b65-s3c-pf9l2: hit regions for the two action rows, filled by rendering and
-  // consumed by touch hit test. Rendering and hit testing share these values so
-  // "drawn here, tapped there" cannot happen. actionId 0 = switch network,
-  // 1 = end session; height 0 means the row is not currently drawn.
-  struct ActionRowHit {
+  // b65-s3c-pf9l2b: the single "change network" button rectangle, filled by
+  // renderServerRunning() and consumed by the loop() touch hit test. Rendering
+  // and hit testing SHARE these exact values — one computation, one {x,y,w,h}.
+  struct ButtonRect {
+    int x = 0;
     int y = 0;
-    int height = 0;
-    int actionId = 0;
+    int w = 0;
+    int h = 0;
   };
-  mutable ActionRowHit actionRows_[2];
+  mutable ButtonRect switchButton_{};
+
+  // b65-s3c-pf9l2b: single-rectangle containment. Pure function so host
+  // assertions can run the real geometry (centre / four edges / one-line-below).
+  static bool buttonHit(const ButtonRect& r, int x, int y) {
+    return r.w > 0 && r.h > 0 && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+  }
 
   void renderServerRunning() const;
   void renderWifiIndicator(int subHeaderTop) const;
@@ -124,6 +114,10 @@ class CrossPointWebServerActivity final : public Activity {
   // b65-s3c-pf9l2: upload-in-flight switch request — confirm the interruption,
   // then reuse the exact same startNetworkSwitch() path (no second teardown).
   void requestSwitchDuringUpload();
+  // b65-s3c-pf9l2b: THE single switch_network dispatch. Both the top-level
+  // Confirm key and the single-button touch call this one function; it applies
+  // the upload gate once. No separate dispatch is duplicated per input source.
+  void requestNetworkSwitch();
 
  public:
   explicit CrossPointWebServerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,

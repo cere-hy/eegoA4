@@ -417,7 +417,7 @@ void CrossPointWebServerActivity::onNetworkSwitchResult(const ActivityResult& re
   const std::string body = tr(STR_PF9L_SWITCH_CANCEL_BODY);
   startActivityForResult(
       std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body,
-                                              tr(STR_PF9L_CHOOSE_NETWORK), tr(STR_PF9L_END_SESSION)),
+                                              tr(STR_PF9L_CHOOSE_NETWORK), tr(STR_PF9L_END_RESTART)),
       [this](const ActivityResult& r) {
         if (r.isCancelled) {
           // "Choose network" — re-enter the list, still no reboot.
@@ -476,6 +476,18 @@ void CrossPointWebServerActivity::requestSwitchDuringUpload() {
         }
         startNetworkSwitch();  // OK -> single shared teardown path (stops upload)
       });
+}
+
+// b65-s3c-pf9l2b: THE single switch_network dispatch. Both the top-level
+// Confirm key and the single-button touch hit funnel into this one function,
+// so the two input sources cannot drift (no copied dispatch). The upload gate
+// lives here and reads the same uploadingNow snapshot taken at loop() top.
+void CrossPointWebServerActivity::requestNetworkSwitch() {
+  if (uploadingNow) {
+    requestSwitchDuringUpload();  // confirm dialog -> same startNetworkSwitch() on OK
+  } else {
+    startNetworkSwitch();
+  }
 }
 
 void CrossPointWebServerActivity::startAccessPoint() {
@@ -759,82 +771,32 @@ void CrossPointWebServerActivity::loop() {
       lastHandleClientTime = millis();
     }
 
-    // b65-s3c-pf9l2: service-screen two-row navigation, now via a pure guard.
-    // pf9l wrote (!webServer || !isRunning()) here, which was TRUE only while
-    // the server was NOT serving — so every key and touch was skipped during a
-    // normal session. serviceNavInputEnabled() states the intended condition
-    // (SERVER_RUNNING with a live server) as a testable predicate; host asserts
-    // enumerate its states so this cannot silently regress again.
-    // Navigation stays outside the blocking handleClient() loop, whose call
-    // order above is unchanged.
-    if (serviceNavInputEnabled(state, webServer != nullptr, webServer && webServer->isRunning())) {
-      const bool moved = mappedInput.wasPressed(MappedInputManager::Button::Down) ||
-                         mappedInput.wasPressed(MappedInputManager::Button::Right);
-      const bool movedUp = mappedInput.wasPressed(MappedInputManager::Button::Up) ||
-                           mappedInput.wasPressed(MappedInputManager::Button::Left);
-      if (moved || movedUp) {
-        serverActionCursor = moved ? 1 : 0;
-        requestUpdate();
-      }
-
-      // b65-s3c-pf9l2: touch hit test on the same row geometry the renderer
-      // filled into actionRows_ (drawn-here / tapped-there cannot diverge).
-      int touchRow = -1;
-      const auto rowTouchEvt = mappedInput.hasTouch()
-          ? mappedInput.rowTouch(touchRow, actionRows_[0].y,
-                                 actionRows_[1].y - actionRows_[0].y, 2,
-                                 0, INT32_MAX, actionRows_[0].height)
-          : MappedInputManager::RowTouch::None;
-      if (rowTouchEvt != MappedInputManager::RowTouch::None && touchRow >= 0 && touchRow < 2 &&
-          actionRows_[touchRow].height > 0) {
-        if (rowTouchEvt == MappedInputManager::RowTouch::Down) {
-          if (serverActionCursor != touchRow) {
-            serverActionCursor = touchRow;
-            requestUpdate();
-          }
-        } else {
-          LOG_DBG("WEBACT", "[INPUT] touch hit y=%d action=%d", actionRows_[touchRow].y,
-                  actionRows_[touchRow].actionId);
-          serverActionCursor = touchRow;
-          if (actionRows_[touchRow].actionId == 0) {
-            // Same gate as the key path: an upload in flight needs an explicit
-            // confirm before tearing the server down (break the weak-signal
-            // deadlock instead of freezing the switch entry).
-            if (uploadingNow) {
-              LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network cursor=%d upload_busy", serverActionCursor);
-              requestSwitchDuringUpload();
-            } else {
-              LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network cursor=%d", serverActionCursor);
-              startNetworkSwitch();
-            }
-          } else {
-            LOG_DBG("WEBACT", "[INPUT] confirm action=end_session cursor=%d", serverActionCursor);
-            requestExitWithConfirmation();
-          }
-          return;
-        }
-      }
-
-      if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-        if (serverActionCursor == 0) {
-          // b65-s3c-pf9l2: gate is INSIDE the switch-network branch only, so
-          // Up/Down (and the end-session row) stay fully responsive during an
-          // upload. On a busy upload, confirm instead of tearing down silently.
-          if (uploadingNow) {
-            LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network cursor=%d upload_busy", serverActionCursor);
-            requestSwitchDuringUpload();  // confirm dialog -> same startNetworkSwitch() on OK
-          } else {
-            LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network cursor=%d", serverActionCursor);
-            startNetworkSwitch();
-          }
-        } else {
-          LOG_DBG("WEBACT", "[INPUT] confirm action=end_session cursor=%d", serverActionCursor);
-          requestExitWithConfirmation();
-        }
-        return;
-      }
-      if (mappedInput.wasReleased(MappedInputManager::Button::Back) || mappedInput.wasHomeGesture()) {
-        requestExitWithConfirmation();  // pf9l: confirm before end-session reboot
+    // b65-s3c-pf9l2b: TOP-LEVEL input dispatch — Confirm and Back in ONE flat
+    // if-chain with no intervening condition (except the state test above).
+    // pf9l2 parked Confirm + touch inside a navigation guard that was
+    // structurally unreachable on the device; Back stayed reachable only
+    // through the two guard-free samples inside handleClient() above.
+    // Here Confirm inherits that reachability by sitting beside Back at this
+    // layer, and both funnel into a single dispatch (requestNetworkSwitch for
+    // switch, requestExitWithConfirmation for exit — no copied switch path).
+    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network");
+      requestNetworkSwitch();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back) || mappedInput.wasHomeGesture()) {
+      requestExitWithConfirmation();  // pf9l: confirm before end-session reboot
+      return;
+    }
+    // b65-s3c-pf9l2b: single-button touch. The rectangle is filled by
+    // renderServerRunning() and read here — one {x,y,w,h}, no second geometry.
+    // A hit calls the SAME requestNetworkSwitch() as Confirm (no duplicate).
+    if (mappedInput.hasTouch()) {
+      int tapX = 0;
+      int tapY = 0;
+      if (mappedInput.wasScreenTapped(tapX, tapY) && buttonHit(switchButton_, tapX, tapY)) {
+        LOG_DBG("WEBACT", "[INPUT] touch hit");
+        requestNetworkSwitch();
         return;
       }
     }
@@ -953,42 +915,33 @@ void CrossPointWebServerActivity::renderServerRunning() const {
   }
 
   if (WIFI_TRANSFER_ACTIVE()) {
-    // b65-s3c-pf9l: two visible, selectable action rows. The change-network
-    // entry must be discoverable without prior knowledge — a hidden key
-    // binding would repeat the "capability exists, user cannot see it" bug of
-    // the old log-only weak-signal warning. Up/Down move the cursor, Confirm
-    // executes; the '>' marker makes the current row unambiguous.
-    // b65-s3c-pf9l2: row STEP is one full line height (getLineHeight), no
-    // longer a body-text verticalSpacing — that was the "rows crammed like a
-    // paragraph" cause. One variable drives both the drawn y and the hit grid.
+    // b65-s3c-pf9l2b: ONE change-network button. "End & exit" is gone — exit
+    // is unified on the top-left Back. A bordered rectangle gives a clear
+    // visual boundary against the IP/QR body (chosen over inverted-fill to
+    // avoid large dark blocks on e-ink). Coordinates are computed ONCE into
+    // switchButton_ and read by both this renderer and the loop() touch hit
+    // test, so "drawn here, tapped there" cannot diverge. With the second row
+    // removed there is > one full line of clearance above the button.
     const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
     const int smallH = renderer.getLineHeight(SMALL_FONT_ID);
     const int hintY = renderer.getScreenHeight() - smallH - 20;
-    const int exitRowY = hintY - lineH;
-    const int switchRowY = exitRowY - lineH;
+    const int btnH = lineH + 8;
+    const int btnW = pageWidth - 2 * metrics.contentSidePadding;
+    const int btnX = metrics.contentSidePadding;
+    const int btnY = hintY - lineH - btnH;  // ≥ one line gap to the hint below
+    switchButton_ = ButtonRect{btnX, btnY, btnW, btnH};
 
-    // Hit region per row: the text occupies at most one small-font line; the
-    // rest of the row step is an intentional blank band so a tap between the
-    // two rows hits neither (n2 boundary case). Filled here, consumed by the
-    // loop() touch test — rendering and hit testing share these exact values.
-    actionRows_[0] = ActionRowHit{switchRowY, smallH, 0};
-    actionRows_[1] = ActionRowHit{exitRowY, smallH, 1};
-
-    char rowBuf[96];
-    // b65-s3c-pf9l2: while an upload is in flight, dim the switch-network row:
-    // keep the '>' marker but render it as '/' so the row reads as unavailable
-    // yet the cursor position stays visible. Reads the same uploadingNow
-    // snapshot the Confirm gate uses (n6 same-source assertion).
-    const char* switchMark = (serverActionCursor == 0) ? (uploadingNow ? "/" : ">") : " ";
-    snprintf(rowBuf, sizeof(rowBuf), "%s %s", switchMark, tr(STR_PF9L_CHANGE_NETWORK));
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, switchRowY, rowBuf);
-    snprintf(rowBuf, sizeof(rowBuf), "%s %s", serverActionCursor == 1 ? ">" : " ", tr(STR_PF9L_END_SESSION));
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, exitRowY, rowBuf);
+    // Grey-out: same uploadingNow snapshot the Confirm gate reads. The '/' vs
+    // '>' marker dims the button while a transfer is in flight; the tap still
+    // works and the gate asks for confirmation (no silent freeze).
+    const char* mark = uploadingNow ? "/" : ">";
+    char btnBuf[96];
+    snprintf(btnBuf, sizeof(btnBuf), "%s %s", mark, tr(STR_PF9L_CHANGE_NETWORK));
+    renderer.drawRect(btnX, btnY, btnW, btnH, true);
+    renderer.drawCenteredText(SMALL_FONT_ID, btnY + (btnH - smallH) / 2, btnBuf, true, EpdFontFamily::BOLD);
 
     // b65-s3c-pf9d: fixed hint under the transfer page — push is paused for the
     // whole session; completing the transfer reboots back to NORMAL mode.
-    // pf9l2: uploadingNow changes trigger requestUpdate() from loop(), so this
-    // hint (and the row grey-out) never goes stale after a state change.
     renderer.drawCenteredText(SMALL_FONT_ID, hintY, tr(STR_MODE_WIFI_HINT), true);
   }
 
