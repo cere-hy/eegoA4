@@ -82,6 +82,33 @@ class CrossPointWebServerActivity final : public Activity {
   // b65-s3c-pf9l: guard so an in-flight exit confirmation cannot be stacked.
   bool exitConfirmPending = false;
 
+  // b65-s3c-pf9l2: service-screen two-row navigation.
+  // Guard lifted to a pure predicate so host assertions can prove reachability
+  // (SERVER_RUNNING + live server => navigate). pf9l wrote the condition as
+  // (!webServer || !isRunning()), which skipped the whole block precisely while
+  // the server was serving — the root cause of both dead keys and dead touch.
+  // Original intent: do not process service-screen input until the server is
+  // actually up; keep that intent by requiring a live server here.
+  static bool serviceNavInputEnabled(WebServerActivityState state, bool serverPresent, bool serverRunning) {
+    return state == WebServerActivityState::SERVER_RUNNING && serverPresent && serverRunning;
+  }
+
+  // b65-s3c-pf9l2: per-frame snapshot of "an upload is in flight", sampled once
+  // at the top of loop(). Render (grey-out) and Confirm dispatch both read this
+  // same value so the row cannot look grey yet still execute on press.
+  bool uploadingNow = false;
+
+  // b65-s3c-pf9l2: hit regions for the two action rows, filled by rendering and
+  // consumed by touch hit test. Rendering and hit testing share these values so
+  // "drawn here, tapped there" cannot happen. actionId 0 = switch network,
+  // 1 = end session; height 0 means the row is not currently drawn.
+  struct ActionRowHit {
+    int y = 0;
+    int height = 0;
+    int actionId = 0;
+  };
+  mutable ActionRowHit actionRows_[2];
+
   void renderServerRunning() const;
   void renderWifiIndicator(int subHeaderTop) const;
 
@@ -94,6 +121,9 @@ class CrossPointWebServerActivity final : public Activity {
   void startNetworkSwitch();
   void onNetworkSwitchResult(const ActivityResult& result);
   void requestExitWithConfirmation();
+  // b65-s3c-pf9l2: upload-in-flight switch request — confirm the interruption,
+  // then reuse the exact same startNetworkSwitch() path (no second teardown).
+  void requestSwitchDuringUpload();
 
  public:
   explicit CrossPointWebServerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,

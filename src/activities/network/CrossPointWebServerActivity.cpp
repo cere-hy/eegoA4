@@ -457,6 +457,27 @@ void CrossPointWebServerActivity::requestExitWithConfirmation() {
       });
 }
 
+void CrossPointWebServerActivity::requestSwitchDuringUpload() {
+  // pf9l2: an upload is in flight. Switching network will stop the server and
+  // drop that transfer — ask first so a stray key/tap cannot abort it, but do
+  // allow it (weak signal may be why the user wants to switch). Reuse the same
+  // ConfirmationActivity and, on OK, the exact same startNetworkSwitch() path;
+  // no second teardown implementation. Default focus stays on Cancel (option 0)
+  // for this destructive action, matching the exit confirmation.
+  const std::string heading = tr(STR_PF9L2_UPLOAD_BUSY_TITLE);
+  const std::string body = tr(STR_PF9L2_UPLOAD_BUSY_BODY);
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body, tr(STR_CANCEL),
+                                              tr(STR_PF9L_CHANGE_NETWORK)),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          requestUpdate();  // cancel -> stay in session, leave the upload running
+          return;
+        }
+        startNetworkSwitch();  // OK -> single shared teardown path (stops upload)
+      });
+}
+
 void CrossPointWebServerActivity::startAccessPoint() {
   LOG_DBG("WEBACT", "Starting Access Point mode...");
   LOG_DBG("WEBACT", "Free heap before AP start: %d bytes", ESP.getFreeHeap());
@@ -618,6 +639,11 @@ void CrossPointWebServerActivity::startWebServer() {
 }
 
 void CrossPointWebServerActivity::loop() {
+  // b65-s3c-pf9l2: single per-frame snapshot of upload-in-flight. Both the
+  // grey-out render and the Confirm gate read this same value, so a row cannot
+  // look dimmed yet still execute (inProgress can flip inside handleClient()).
+  uploadingNow = webServer && webServer->getWsUploadStatus().inProgress;
+
   // b65-s3c-pf9d clause 11: an idle WiFi-transfer session auto-returns to
   // NORMAL after 30 minutes (b65-s3c-pf9j, was 10) of no physical input.
   // A plain reboot restores a pristine NORMAL heap; esp_wifi_deinit() is
@@ -733,13 +759,15 @@ void CrossPointWebServerActivity::loop() {
       lastHandleClientTime = millis();
     }
 
-    // b65-s3c-pf9l: service-screen two-row navigation.
-    // Up/Down (or Left/Right) move the visible cursor; Confirm executes the
-    // selected row. Back/Home is the confirmed end-session exit. Navigation is
-    // handled here, outside the blocking handleClient() loop, so an upload is
-    // never interrupted by a cursor move.
-    if (state == WebServerActivityState::SERVER_RUNNING &&
-        (!webServer || !webServer->isRunning())) {
+    // b65-s3c-pf9l2: service-screen two-row navigation, now via a pure guard.
+    // pf9l wrote (!webServer || !isRunning()) here, which was TRUE only while
+    // the server was NOT serving — so every key and touch was skipped during a
+    // normal session. serviceNavInputEnabled() states the intended condition
+    // (SERVER_RUNNING with a live server) as a testable predicate; host asserts
+    // enumerate its states so this cannot silently regress again.
+    // Navigation stays outside the blocking handleClient() loop, whose call
+    // order above is unchanged.
+    if (serviceNavInputEnabled(state, webServer != nullptr, webServer && webServer->isRunning())) {
       const bool moved = mappedInput.wasPressed(MappedInputManager::Button::Down) ||
                          mappedInput.wasPressed(MappedInputManager::Button::Right);
       const bool movedUp = mappedInput.wasPressed(MappedInputManager::Button::Up) ||
@@ -748,10 +776,59 @@ void CrossPointWebServerActivity::loop() {
         serverActionCursor = moved ? 1 : 0;
         requestUpdate();
       }
+
+      // b65-s3c-pf9l2: touch hit test on the same row geometry the renderer
+      // filled into actionRows_ (drawn-here / tapped-there cannot diverge).
+      int touchRow = -1;
+      const auto rowTouchEvt = mappedInput.hasTouch()
+          ? mappedInput.rowTouch(touchRow, actionRows_[0].y,
+                                 actionRows_[1].y - actionRows_[0].y, 2,
+                                 0, INT32_MAX, actionRows_[0].height)
+          : MappedInputManager::RowTouch::None;
+      if (rowTouchEvt != MappedInputManager::RowTouch::None && touchRow >= 0 && touchRow < 2 &&
+          actionRows_[touchRow].height > 0) {
+        if (rowTouchEvt == MappedInputManager::RowTouch::Down) {
+          if (serverActionCursor != touchRow) {
+            serverActionCursor = touchRow;
+            requestUpdate();
+          }
+        } else {
+          LOG_DBG("WEBACT", "[INPUT] touch hit y=%d action=%d", actionRows_[touchRow].y,
+                  actionRows_[touchRow].actionId);
+          serverActionCursor = touchRow;
+          if (actionRows_[touchRow].actionId == 0) {
+            // Same gate as the key path: an upload in flight needs an explicit
+            // confirm before tearing the server down (break the weak-signal
+            // deadlock instead of freezing the switch entry).
+            if (uploadingNow) {
+              LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network cursor=%d upload_busy", serverActionCursor);
+              requestSwitchDuringUpload();
+            } else {
+              LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network cursor=%d", serverActionCursor);
+              startNetworkSwitch();
+            }
+          } else {
+            LOG_DBG("WEBACT", "[INPUT] confirm action=end_session cursor=%d", serverActionCursor);
+            requestExitWithConfirmation();
+          }
+          return;
+        }
+      }
+
       if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
         if (serverActionCursor == 0) {
-          startNetworkSwitch();
+          // b65-s3c-pf9l2: gate is INSIDE the switch-network branch only, so
+          // Up/Down (and the end-session row) stay fully responsive during an
+          // upload. On a busy upload, confirm instead of tearing down silently.
+          if (uploadingNow) {
+            LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network cursor=%d upload_busy", serverActionCursor);
+            requestSwitchDuringUpload();  // confirm dialog -> same startNetworkSwitch() on OK
+          } else {
+            LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network cursor=%d", serverActionCursor);
+            startNetworkSwitch();
+          }
         } else {
+          LOG_DBG("WEBACT", "[INPUT] confirm action=end_session cursor=%d", serverActionCursor);
           requestExitWithConfirmation();
         }
         return;
@@ -881,19 +958,37 @@ void CrossPointWebServerActivity::renderServerRunning() const {
     // binding would repeat the "capability exists, user cannot see it" bug of
     // the old log-only weak-signal warning. Up/Down move the cursor, Confirm
     // executes; the '>' marker makes the current row unambiguous.
+    // b65-s3c-pf9l2: row STEP is one full line height (getLineHeight), no
+    // longer a body-text verticalSpacing — that was the "rows crammed like a
+    // paragraph" cause. One variable drives both the drawn y and the hit grid.
     const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
-    const int hintY = renderer.getScreenHeight() - renderer.getLineHeight(SMALL_FONT_ID) - 20;
-    const int exitRowY = hintY - lineH - metrics.verticalSpacing;
-    const int switchRowY = exitRowY - lineH - metrics.verticalSpacing;
+    const int smallH = renderer.getLineHeight(SMALL_FONT_ID);
+    const int hintY = renderer.getScreenHeight() - smallH - 20;
+    const int exitRowY = hintY - lineH;
+    const int switchRowY = exitRowY - lineH;
+
+    // Hit region per row: the text occupies at most one small-font line; the
+    // rest of the row step is an intentional blank band so a tap between the
+    // two rows hits neither (n2 boundary case). Filled here, consumed by the
+    // loop() touch test — rendering and hit testing share these exact values.
+    actionRows_[0] = ActionRowHit{switchRowY, smallH, 0};
+    actionRows_[1] = ActionRowHit{exitRowY, smallH, 1};
 
     char rowBuf[96];
-    snprintf(rowBuf, sizeof(rowBuf), "%s %s", serverActionCursor == 0 ? ">" : " ", tr(STR_PF9L_CHANGE_NETWORK));
+    // b65-s3c-pf9l2: while an upload is in flight, dim the switch-network row:
+    // keep the '>' marker but render it as '/' so the row reads as unavailable
+    // yet the cursor position stays visible. Reads the same uploadingNow
+    // snapshot the Confirm gate uses (n6 same-source assertion).
+    const char* switchMark = (serverActionCursor == 0) ? (uploadingNow ? "/" : ">") : " ";
+    snprintf(rowBuf, sizeof(rowBuf), "%s %s", switchMark, tr(STR_PF9L_CHANGE_NETWORK));
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, switchRowY, rowBuf);
     snprintf(rowBuf, sizeof(rowBuf), "%s %s", serverActionCursor == 1 ? ">" : " ", tr(STR_PF9L_END_SESSION));
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, exitRowY, rowBuf);
 
     // b65-s3c-pf9d: fixed hint under the transfer page — push is paused for the
     // whole session; completing the transfer reboots back to NORMAL mode.
+    // pf9l2: uploadingNow changes trigger requestUpdate() from loop(), so this
+    // hint (and the row grey-out) never goes stale after a state change.
     renderer.drawCenteredText(SMALL_FONT_ID, hintY, tr(STR_MODE_WIFI_HINT), true);
   }
 
