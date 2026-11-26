@@ -499,9 +499,13 @@ void CrossPointWebServerActivity::requestNetworkSwitch() {
   networkSwitchInProgress = true;
   state = WebServerActivityState::WIFI_SELECTION;
   LOG_INF("WEBACT", "pf9l3: switch requested; keeping old server/WiFi up while selecting (no teardown)");
+  // b65-s3c-pf9l5: suppress the misleading "connection failed, retry" hint on a
+  // PROACTIVE switch. retryHintOnEnter stays true (state machine + auto-connect
+  // short-circuit unchanged); showFailureHint is display-only.
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput,
                                                                  /*autoConnect=*/false,
-                                                                 /*retryHintOnEnter=*/true),
+                                                                 /*retryHintOnEnter=*/true,
+                                                                 /*showFailureHint=*/false),
                          [this](const ActivityResult& result) { onNetworkSwitchResult(result); });
 }
 

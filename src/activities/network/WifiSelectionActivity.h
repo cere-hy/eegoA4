@@ -97,6 +97,13 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
   // auto-connect so the user is left on the network list / retry prompt.
   const bool retryHintOnEnter;
 
+  // b65-s3c-pf9l5: display-only gate for the failure hint line. Default true
+  // keeps every pre-existing call site behaviour-identical to pf9l4; only
+  // requestNetworkSwitch() passes false to suppress the misleading
+  // "connection failed, retry" text on a proactive network change. It never
+  // feeds the state machine, the auto-connect short-circuit, nor linkHandedOver.
+  const bool showFailureHint;
+
   // Whether we are attempting to auto-connect or auto-scan saved networks.
   bool autoConnecting = false;
 
@@ -169,7 +176,7 @@ class WifiSelectionActivity final : public Activity, private UiAppHost {
 
  public:
   explicit WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, bool autoConnect = true,
-                                 bool retryHintOnEnter = false);
+                                 bool retryHintOnEnter = false, bool showFailureHint = true);
   void onEnter() override;
   void onExit() override;
   void loop() override;
