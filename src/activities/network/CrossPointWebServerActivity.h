@@ -70,8 +70,11 @@ class CrossPointWebServerActivity final : public Activity {
   // instead of every 2 s (field: 40+ lines in 379 s drowned other evidence).
   bool lastWeakWarned = false;
 
-  // b65-s3c-pf9l: set while the no-reboot in-session network switch is active.
-  // Used only by the return path to avoid re-entering server init twice.
+  // b65-s3c-pf9l3: set the moment the change-network button is pressed and
+  // cleared in BOTH onNetworkSwitchResult branches. loop() uses it to SKIP
+  // handleClient() polling (not stop the server) while the selection page is
+  // up; teardown is deferred to the success branch. Must be cleared on cancel
+  // too, or loop() would silently stop serving forever.
   bool networkSwitchInProgress = false;
 
   // b65-s3c-pf9l: guard so an in-flight exit confirmation cannot be stacked.
@@ -113,10 +116,14 @@ class CrossPointWebServerActivity final : public Activity {
   void requestExitWithConfirmation();
   // b65-s3c-pf9l2: upload-in-flight switch request — confirm the interruption,
   // then reuse the exact same startNetworkSwitch() path (no second teardown).
+  // b65-s3c-pf9l3: this is now the ONLY caller of startNetworkSwitch(); the
+  // non-upload path (requestNetworkSwitch) does not teardown before selecting.
   void requestSwitchDuringUpload();
   // b65-s3c-pf9l2b: THE single switch_network dispatch. Both the top-level
   // Confirm key and the single-button touch call this one function; it applies
   // the upload gate once. No separate dispatch is duplicated per input source.
+  // b65-s3c-pf9l3: non-upload branch only sets networkSwitchInProgress and
+  // pushes WifiSelectionActivity — NO teardown here (deferred to success).
   void requestNetworkSwitch();
 
  public:

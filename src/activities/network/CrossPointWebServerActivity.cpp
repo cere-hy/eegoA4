@@ -397,39 +397,41 @@ void CrossPointWebServerActivity::startNetworkSwitch() {
 
 void CrossPointWebServerActivity::onNetworkSwitchResult(const ActivityResult& result) {
   if (!result.isCancelled) {
-    // Reuse the pf9h/i-verified completion path verbatim; do NOT author a
-    // second server-init path for the switch (l3: re-enter startWebServer()).
+    // b65-s3c-pf9l3: THE core reorder. The old server/MDNS/WiFi were left UP
+    // on entry (requestNetworkSwitch did NOT tear them down), so teardown
+    // happens HERE — only after the new AP is confirmed connected. Log the
+    // success FIRST so "STOP INITIATED" (emitted by webServer->stop()) follows
+    // this line in the field log: that order proves the teardown was moved.
+    // NO WiFi.disconnect() here — the station link already points at the new
+    // AP; dropping it would undo the connection we just established.
+    // Reuse the pf9h/i-verified completion path verbatim (startWebServer).
     const auto& wifi = std::get<WifiResult>(result.data);
     connectedIP = wifi.ip;
     connectedSSID = wifi.ssid;
-    networkSwitchInProgress = false;
     LOG_INF("WEBACT", "pf9l: switch connected ssid=%s ip=%s; reusing startWebServer (no reboot)",
             connectedSSID.c_str(), connectedIP.c_str());
+    stopDnsServer();
+    MDNS.end();
+    if (webServer) {
+      webServer->stop();    // emits "STOP INITIATED" — now AFTER "switch connected"
+      webServer.reset();
+    }
+    pluginevents::refreshSubscriptions();
+    networkSwitchInProgress = false;
     onWifiSelectionComplete(true);
     return;
   }
 
-  // Cancelled inside the switch: never return to a half-state "server running"
-  // screen (server is down, IP is gone). Stay in the network list unless the
-  // user explicitly ends the session — no reboot on a plain Back.
-  LOG_INF("WEBACT", "pf9l: switch cancelled; prompting choose-network or end-session");
-  const std::string heading = tr(STR_PF9L_SWITCH_CANCEL_TITLE);
-  const std::string body = tr(STR_PF9L_SWITCH_CANCEL_BODY);
-  startActivityForResult(
-      std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body,
-                                              tr(STR_PF9L_CHOOSE_NETWORK), tr(STR_PF9L_END_RESTART)),
-      [this](const ActivityResult& r) {
-        if (r.isCancelled) {
-          // "Choose network" — re-enter the list, still no reboot.
-          state = WebServerActivityState::WIFI_SELECTION;
-          startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, false, true),
-                                 [this](const ActivityResult& rr) { onNetworkSwitchResult(rr); });
-        } else {
-          // "End session" — reuse the existing exit path (boot_mode=NORMAL + restart).
-          networkSwitchInProgress = false;
-          onGoHome();
-        }
-      });
+  // b65-s3c-pf9l3: cancel is a TRUE no-op now. No confirmation dialog, no
+  // re-enter, no reboot, NO teardown — the old server/mDNS/WiFi objects were
+  // never touched on entry, so the run page comes back exactly as it was.
+  // (Caveat 0-2: if the user scanned, WifiSelectionActivity::startWifiScan()
+  // called WiFi.disconnect() on its own; that is an existing behaviour of the
+  // frozen WifiSelectionActivity, not a teardown performed by this branch.)
+  networkSwitchInProgress = false;
+  state = WebServerActivityState::SERVER_RUNNING;
+  LOG_INF("WEBACT", "pf9l3: switch cancelled; old server/WiFi kept as-is, back to run page");
+  requestUpdate();
 }
 
 // ---------------------------------------------------------------------------
@@ -482,12 +484,25 @@ void CrossPointWebServerActivity::requestSwitchDuringUpload() {
 // Confirm key and the single-button touch hit funnel into this one function,
 // so the two input sources cannot drift (no copied dispatch). The upload gate
 // lives here and reads the same uploadingNow snapshot taken at loop() top.
+// b65-s3c-pf9l3: "先选后拆" — this path NO LONGER tears the server/MDNS/WiFi
+// down. It only marks the switch in progress and pushes the selection page;
+// loop() stops polling handleClient() while the flag is set, and teardown is
+// deferred to onNetworkSwitchResult()'s SUCCESS branch (after the new AP is
+// up). Cancel therefore leaves the old server/MDNS/WiFi untouched. The upload
+// path is the one exception: it still confirms, then uses startNetworkSwitch()
+// unchanged (hard constraint 4).
 void CrossPointWebServerActivity::requestNetworkSwitch() {
   if (uploadingNow) {
     requestSwitchDuringUpload();  // confirm dialog -> same startNetworkSwitch() on OK
-  } else {
-    startNetworkSwitch();
+    return;
   }
+  networkSwitchInProgress = true;
+  state = WebServerActivityState::WIFI_SELECTION;
+  LOG_INF("WEBACT", "pf9l3: switch requested; keeping old server/WiFi up while selecting (no teardown)");
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput,
+                                                                 /*autoConnect=*/false,
+                                                                 /*retryHintOnEnter=*/true),
+                         [this](const ActivityResult& result) { onNetworkSwitchResult(result); });
 }
 
 void CrossPointWebServerActivity::startAccessPoint() {
@@ -731,7 +746,10 @@ void CrossPointWebServerActivity::loop() {
     }
 
     // Handle web server requests - maximize throughput with watchdog safety
-    if (webServer && webServer->isRunning()) {
+    // b65-s3c-pf9l3: while a network switch is in progress (selection page up)
+    // SKIP polling rather than stop() the server. The server object, mDNS and
+    // the WiFi link stay alive in memory; queued client requests simply wait.
+    if (!networkSwitchInProgress && webServer && webServer->isRunning()) {
       const unsigned long timeSinceLastHandleClient = millis() - lastHandleClientTime;
 
       // Log if there's a significant gap between handleClient calls (>100ms)
@@ -780,6 +798,11 @@ void CrossPointWebServerActivity::loop() {
     // layer, and both funnel into a single dispatch (requestNetworkSwitch for
     // switch, requestExitWithConfirmation for exit — no copied switch path).
     if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+      // 0-1: eego_a4 has no physical Confirm key (only UP/DOWN/POWER); this
+      // branch is reachable only via synthesized Confirm (BLE remote / user-
+      // configured home/power). Log it so a future Confirm-capable input source
+      // is observable, but do not treat key input as the primary path here.
+      LOG_DBG("WEBACT", "[INPUT] key confirm");
       LOG_DBG("WEBACT", "[INPUT] confirm action=switch_network");
       requestNetworkSwitch();
       return;
@@ -795,7 +818,10 @@ void CrossPointWebServerActivity::loop() {
       int tapX = 0;
       int tapY = 0;
       if (mappedInput.wasScreenTapped(tapX, tapY) && buttonHit(switchButton_, tapX, tapY)) {
-        LOG_DBG("WEBACT", "[INPUT] touch hit");
+        // 0-6: restore the y/action arguments (lost when pf9l2b collapsed the
+        // two-row list to one button). action=0 is the single change-network
+        // button; y=tapY lets the field log prove which row band was hit.
+        LOG_DBG("WEBACT", "[INPUT] touch hit y=%d action=%d", tapY, 0);
         requestNetworkSwitch();
         return;
       }
