@@ -286,7 +286,6 @@ void WifiSelectionActivity::startWifiScan(const bool autoScan) {
             static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()),
             static_cast<unsigned>(staModeOk ? 0 : 1));
 #endif
-  WiFi.disconnect();
   delay(100);
 
   // Start async scan
