@@ -174,7 +174,8 @@ static void test_end_accept(void) {
 
     uint8_t st[16];
     size_t sl = push_sink_core_status(&c, st, sizeof(st));
-    CHECK(sl == 1 && st[0] == PUSH_ST_DONE);
+    // 000-39b1: DONE(0x12) now carries a 1B PUSH_RES_* result code (OK=0).
+    CHECK(sl == 2 && st[0] == PUSH_ST_DONE && st[1] == PUSH_RES_OK);
 }
 
 /* ---- ④ CRC 不匹配拒绝（保留 .part，不 DROP） ---- */

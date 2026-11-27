@@ -202,11 +202,17 @@ static void formatInstant(const PushInstant& p, char out[32]) {
 /// Transactional four-beat: PUSH.txt -> .bak -> tmp(cleaned) -> PUSH.txt -> clear .bak.
 /// `inst` (when year!=0) is stamped onto the final file so its FAT mtime equals
 /// the push instant instead of SdFat's compile-year placeholder.
-static bool commitDocument(const std::string& cleaned, const PushInstant& inst) {
+// 000-39b1: outErr distinguishes "storage not openable" (PUSH_ERR_NO_CARD)
+// from "opened but write/rename failed" (PUSH_ERR_WRITE_FAIL). The caller
+// turns a failure into STATUS ERR(0x13) with a 1B body instead of letting the
+// core's pre-emitted DONE(OK) masquerade as success.
+static bool commitDocument(const std::string& cleaned, const PushInstant& inst, uint8_t& outErr) {
+  outErr = PUSH_ERR_WRITE_FAIL;  // default: opened OK, write/rename failed
   {  // 1) cleaned -> tmp
     HalFile t;
     if (!Storage.openFileForWrite("PUSH", kTmpPath, t)) {
       logf("commit tmp open FAIL");
+      outErr = PUSH_ERR_NO_CARD;  // cannot open for write => no/unusable card
       return false;
     }
     const size_t w = t.write(reinterpret_cast<const uint8_t*>(cleaned.data()), cleaned.size());
@@ -218,6 +224,7 @@ static bool commitDocument(const std::string& cleaned, const PushInstant& inst) 
     }
     if (w != cleaned.size()) {
       logf("commit tmp short %u/%u", (unsigned)w, (unsigned)cleaned.size());
+      outErr = PUSH_ERR_WRITE_FAIL;  // opened but short write => card full / IO error
       return false;
     }
   }  // closed before rename
@@ -227,6 +234,7 @@ static bool commitDocument(const std::string& cleaned, const PushInstant& inst) 
     if (!Storage.rename(kBookPath, kBakPath)) {
       logf("commit backup FAIL");
       Storage.remove(kTmpPath);
+      outErr = PUSH_ERR_WRITE_FAIL;  // opened but rename failed
       return false;
     }
     hadBak = true;
@@ -237,6 +245,7 @@ static bool commitDocument(const std::string& cleaned, const PushInstant& inst) 
       Storage.remove(kBookPath);
       Storage.rename(kBakPath, kBookPath);
     }
+    outErr = PUSH_ERR_WRITE_FAIL;  // opened but final rename failed
     return false;
   }
   if (hadBak) Storage.remove(kBakPath);  // 4) clear .bak
@@ -387,17 +396,35 @@ void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
       uint32_t t0 = millis();
       std::string cleaned;
       const PushInstant inst = capturePushInstant();  // S3cPF6: one instant for mtime + cover
-      if (cleanPart(cleaned) && commitDocument(cleaned, inst)) {
+      uint8_t errCode = PUSH_ERR_NO_CARD;
+      bool committed = false;
+      if (!cleanPart(cleaned)) {
+        // 000-39b1: cannot read back .part => storage unavailable (no/unusable card).
+        errCode = PUSH_ERR_NO_CARD;
+      } else {
+        committed = commitDocument(cleaned, inst, errCode);
+      }
+      if (committed) {
         logf("COMMIT ok bytes=%u ms=%u", (unsigned)cleaned.size(), (unsigned)(millis() - t0));
         Storage.remove(kPartPath);  // fully consumed — safe to drop
         generatePushThumb(cleaned.size(), inst);  // S3b P4: best-effort cover; failure is silent
         g_pushCompleted.store(true, std::memory_order_release);  // S3b P3: let main loop auto-open
       } else {
+        // 000-39b1 (裁定1): the core already emitted DONE(OK) into g_core.status
+        // inside push_sink_core_on_ctrl(END) because VERIFY passed. A disk-write
+        // failure AFTER that must override it with ERR(0x13)+1B code — otherwise
+        // the APK reports success on a document that was never written (false ACK).
+        // Both paths carry a 1B body; text path uses PUSH_ERR_* (fine-grained).
+        const uint8_t code = errCode;
+        const size_t n = push_status_encode(PUSH_ST_ERR, &code, 1,
+                                            g_core.status, sizeof(g_core.status));
+        g_core.status_len = n;
+        logf("PUSH ACK: STATUS ERR code=%u stage=write (DONE overridden)", (unsigned)code);
         // Keep .part so a retry can rebuild the document without a re-push.
         logf("COMMIT FAIL — original PUSH.txt preserved, .part kept for retry");
       }
     }
-    // DONE/ERR produced by the core; send after commit so DONE means "book ready".
+    // DONE (now with 1B PUSH_RES_OK body) or the ERR override above; send after commit.
     emitStatus(now);
     return;
   }

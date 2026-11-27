@@ -173,7 +173,12 @@ uint32_t push_sink_core_on_ctrl(push_sink_core_t *c, const uint8_t *frame, size_
             c->doc_type = c->sess.begin.type;
             c->open_ready = true;
             c->commit_ready = true;
-            emit_status(c, PUSH_ST_DONE, NULL, 0);
+            // 000-39b1: DONE(0x12) carries a 1B result code (PUSH_RES_*).
+            // Only 0x12 gains a body; 0x17/0x19/0x08/0x06 stay exact-length elsewhere.
+            {
+                const uint8_t code = PUSH_RES_OK;
+                emit_status(c, PUSH_ST_DONE, &code, 1);
+            }
         } else {
             maybe_emit_err(c, acts); // CHECKSUM：CRC/长度不符 → ST_ERR(4)，.part 保留供续传
             c->open_ready = false;

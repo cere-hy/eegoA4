@@ -76,6 +76,21 @@ enum {
     PUSH_ERR_BUSY = 7,
     PUSH_ERR_FETCH = 8,     ///< URL 类型当前不支持（协议认、业务拒）
     PUSH_ERR_NO_DICT = 9,
+    PUSH_ERR_WRITE_FAIL = 10, ///< 存储空间已满 / 只读挂载 / IO 错误导致写盘失败（000-39b1 新增）
+};
+
+/// 推送结果码（STATUS DONE 的 1B body；壁纸路径下 ERR 的 body 亦用此表）。
+/// 与 PUSH_ERR_* 分属两套码表、语义轴不同：
+///   PUSH_ERR_*  按「出错步骤」细分，供固件排查；
+///   PUSH_RES_*  按「APK 该不该重试 / 图能不能用」划分，供 APK 处置。
+/// 约定：壁纸路径一律使用 PUSH_RES_*，即便成因与某个 PUSH_ERR_* 相同也不混用
+/// （码表按 APK 处置逻辑划分，不按固件排查便利划分）。
+/// 注：PUSH_ERR_NONE=0 表示「没有错误」，是 ERR 帧的 body，本表不复用其措辞。
+enum {
+    PUSH_RES_OK = 0,          ///< DONE body：本次写盘（+上屏）成功
+    PUSH_RES_UNUSABLE = 1,    ///< 图不可用：解析失败/IHDR 不符/像素越界/长度不符
+    PUSH_RES_BUSY = 7,        ///< 忙；与 PUSH_ERR_BUSY 同值同义（预留）
+    PUSH_RES_WRITE_FAIL = 10, ///< 写盘或上屏失败；与 PUSH_ERR_WRITE_FAIL 同值同义
 };
 
 /// BEGIN 帧（83 字节，全部小端）—— 冻结布局，与 APK 参考实现逐字节一致。
