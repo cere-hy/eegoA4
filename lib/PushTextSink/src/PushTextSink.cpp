@@ -20,6 +20,16 @@
 #include <string>
 
 namespace pushtextsink {
+#ifdef PUSH_TEST_INJECT_WRITE_FAIL
+// ---- 000-39b1a-t: test-only write-failure injection (never in delivery) ----
+// Compiled in ONLY when -DPUSH_TEST_INJECT_WRITE_FAIL is passed. Without the
+// macro this whole block is preprocessed away, so the file stays byte-identical
+// to the 000-39b1a baseline (asserted by n1: strip-then-hash == 874c425d…).
+// Point semantics: 0 = no injection (default), 1 = cleanPart read fails,
+// 2 = openFileForWrite fails, 3 = short write / rename fails.
+static int g_test_fail_point = 0;  // default 0: a forgotten setting can NOT fail a push
+extern "C" void push_test_set_fail_point(int p) { g_test_fail_point = p; }
+#endif
 namespace {
 
 // ---- paths (fixed; book name is a hardcoded constant per S3 decision) ----
@@ -152,6 +162,12 @@ static bool verifyPart(uint32_t* outCrc, uint32_t* outLen) {
 
 /// Six-step clean raw .part -> std::string.
 static bool cleanPart(std::string& outClean) {
+#ifdef PUSH_TEST_INJECT_WRITE_FAIL
+  if (g_test_fail_point == 1) {
+    logf("TEST INJECT: cleanPart read fail (point 1)");
+    return false;
+  }
+#endif
   if (!Storage.readFileToString("PUSH", kPartPath, PUSH_TOTAL_MAX + 1, outClean)) {
     logf("clean read FAIL");
     return false;
@@ -214,6 +230,12 @@ static bool commitDocument(const std::string& cleaned, const PushInstant& inst, 
   outErr = PUSH_ERR_WRITE_FAIL;  // default: opened OK, write/rename failed
   {  // 1) cleaned -> tmp
     HalFile t;
+#ifdef PUSH_TEST_INJECT_WRITE_FAIL
+    if (g_test_fail_point == 2) {
+      logf("TEST INJECT: openFileForWrite fail (point 2)");
+      return false;  // outErr stays WRITE_FAIL, same as the real open failure
+    }
+#endif
     if (!Storage.openFileForWrite("PUSH", kTmpPath, t)) {
       logf("commit tmp open FAIL");
       return false;  // outErr already WRITE_FAIL: cannot distinguish cause
@@ -225,6 +247,13 @@ static bool commitDocument(const std::string& cleaned, const PushInstant& inst, 
         !t.setModificationTime(inst.year, inst.month, inst.day, inst.hour, inst.minute, inst.second)) {
       logf("commit mtime stamp FAIL (mtime may stay placeholder)");
     }
+#ifdef PUSH_TEST_INJECT_WRITE_FAIL
+    if (g_test_fail_point == 3) {
+      logf("TEST INJECT: force short write (point 3)");
+      outErr = PUSH_ERR_WRITE_FAIL;
+      return false;
+    }
+#endif
     if (w != cleaned.size()) {
       logf("commit tmp short %u/%u", (unsigned)w, (unsigned)cleaned.size());
       outErr = PUSH_ERR_WRITE_FAIL;  // opened but short write => card full / IO error
@@ -242,6 +271,15 @@ static bool commitDocument(const std::string& cleaned, const PushInstant& inst, 
     }
     hadBak = true;
   }
+#ifdef PUSH_TEST_INJECT_WRITE_FAIL
+  if (g_test_fail_point == 3) {
+    logf("TEST INJECT: force final rename fail (point 3)");
+    Storage.remove(kTmpPath);
+    if (hadBak) Storage.rename(kBakPath, kBookPath);
+    outErr = PUSH_ERR_WRITE_FAIL;
+    return false;
+  }
+#endif
   if (!Storage.rename(kTmpPath, kBookPath)) {  // 3) tmp -> PUSH.txt
     logf("commit rename FAIL; rollback");
     if (hadBak) {

@@ -3,6 +3,9 @@
 #include <AiResultSink.h>
 #include <BlePushGatt.h>
 #include <PushTextSink.h>  // B6.5 S2: text-push GATT glue (BEGIN→READY handshake)
+#ifdef PUSH_TEST_INJECT_WRITE_FAIL
+extern "C" void push_test_set_fail_point(int p);  // 000-39b1a-t: test-only, defined in PushTextSink.cpp
+#endif
 #include <ScenePush.h>  // diag-pace: non-blocking pacer for multi-frame 0x1A bursts
 #include <BoardConfig.h>
 #include <Epub.h>
@@ -1106,6 +1109,15 @@ void loop() {
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
       }
+#ifdef PUSH_TEST_INJECT_WRITE_FAIL
+      // 000-39b1a-t: test-only. Usage: CMD:push_test_fail <0|1|2|3>
+      // 0 = no injection, 1 = cleanPart read fail, 2 = open fail, 3 = write/rename fail.
+      else if (cmd.startsWith("push_test_fail ")) {
+        const int point = cmd.substring(15).toInt();
+        push_test_set_fail_point(point);
+        logSerial.printf("push_test_fail=%d\n", point);
+      }
+#endif
     }
   }
 
