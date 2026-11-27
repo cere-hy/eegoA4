@@ -7,6 +7,7 @@
 extern "C" void push_test_set_fail_point(int p);  // 000-39b1a-t: test-only, defined in PushTextSink.cpp
 #endif
 #include <ScenePush.h>  // diag-pace: non-blocking pacer for multi-frame 0x1A bursts
+#include <WallpaperDecoderApi.h>  // 000-39b2: palette PNG -> 2bpp direct wallpaper
 #include <BoardConfig.h>
 #include <Epub.h>
 #include <FontCacheManager.h>
@@ -1108,6 +1109,12 @@ void loop() {
         uint8_t* buf = display.getFrameBuffer();
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
+      }
+      // 000-39b2: 自造件直通测试。Usage: CMD:wallpaper [0|1]  (swap plane 0=index-is-MSB, 1=swap)
+      else if (cmd == "wallpaper" || cmd.startsWith("wallpaper ")) {
+        const bool swap = cmd.startsWith("wallpaper 1");
+        const uint8_t res = wallpaper::showWallpaper(renderer, "/wallpaper/wallpaper.png", swap);
+        logSerial.printf("wallpaper_result=%d swap=%d\n", res, swap ? 1 : 0);
       }
 #ifdef PUSH_TEST_INJECT_WRITE_FAIL
       // 000-39b1a-t: test-only. Usage: CMD:push_test_fail <0|1|2|3>
