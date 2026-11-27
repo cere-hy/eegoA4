@@ -202,18 +202,21 @@ static void formatInstant(const PushInstant& p, char out[32]) {
 /// Transactional four-beat: PUSH.txt -> .bak -> tmp(cleaned) -> PUSH.txt -> clear .bak.
 /// `inst` (when year!=0) is stamped onto the final file so its FAT mtime equals
 /// the push instant instead of SdFat's compile-year placeholder.
-// 000-39b1: outErr distinguishes "storage not openable" (PUSH_ERR_NO_CARD)
-// from "opened but write/rename failed" (PUSH_ERR_WRITE_FAIL). The caller
-// turns a failure into STATUS ERR(0x13) with a 1B body instead of letting the
-// core's pre-emitted DONE(OK) masquerade as success.
+// 000-39b1: outErr reports a 1B failure code so the caller can turn a
+// post-VERIFY disk failure into STATUS ERR(0x13) instead of letting the core's
+// pre-emitted DONE(OK) masquerade as success.
+// 000-39b1a: every storage failure reports PUSH_ERR_WRITE_FAIL. Storage exposes
+// no card-presence signal (SDCardManager::ready() is a one-shot "mounted" flag,
+// all file APIs are bare bool), so a distinct "no card" code cannot be told
+// apart from read-only mount / full card / IO error. Reporting WRITE_FAIL for
+// all of them beats a wrong "no card" that points diagnosis the wrong way.
 static bool commitDocument(const std::string& cleaned, const PushInstant& inst, uint8_t& outErr) {
   outErr = PUSH_ERR_WRITE_FAIL;  // default: opened OK, write/rename failed
   {  // 1) cleaned -> tmp
     HalFile t;
     if (!Storage.openFileForWrite("PUSH", kTmpPath, t)) {
       logf("commit tmp open FAIL");
-      outErr = PUSH_ERR_NO_CARD;  // cannot open for write => no/unusable card
-      return false;
+      return false;  // outErr already WRITE_FAIL: cannot distinguish cause
     }
     const size_t w = t.write(reinterpret_cast<const uint8_t*>(cleaned.data()), cleaned.size());
     t.flush();
@@ -396,11 +399,12 @@ void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
       uint32_t t0 = millis();
       std::string cleaned;
       const PushInstant inst = capturePushInstant();  // S3cPF6: one instant for mtime + cover
-      uint8_t errCode = PUSH_ERR_NO_CARD;
+      // 000-39b1a: storage failures are not split into "no card" vs "write";
+      // see commitDocument's header note. Both enter here as WRITE_FAIL.
+      uint8_t errCode = PUSH_ERR_WRITE_FAIL;
       bool committed = false;
       if (!cleanPart(cleaned)) {
-        // 000-39b1: cannot read back .part => storage unavailable (no/unusable card).
-        errCode = PUSH_ERR_NO_CARD;
+        // Cannot read back .part: missing/corrupt/read-only/IO — all WRITE_FAIL.
       } else {
         committed = commitDocument(cleaned, inst, errCode);
       }

@@ -86,11 +86,15 @@ enum {
 /// 约定：壁纸路径一律使用 PUSH_RES_*，即便成因与某个 PUSH_ERR_* 相同也不混用
 /// （码表按 APK 处置逻辑划分，不按固件排查便利划分）。
 /// 注：PUSH_ERR_NONE=0 表示「没有错误」，是 ERR 帧的 body，本表不复用其措辞。
+///
+/// 000-39b1a：本表是独立号段，按 0/1/2/3 连续编号，【不与 PUSH_ERR_* 对齐】。
+/// 因此 PUSH_RES_WRITE_FAIL=2 与 PUSH_ERR_WRITE_FAIL=10 数值不同是刻意的，
+/// 不是笔误——两套表各自按自己的号段顺序走，APK 侧按帧型取用对应表。
 enum {
     PUSH_RES_OK = 0,          ///< DONE body：本次写盘（+上屏）成功
     PUSH_RES_UNUSABLE = 1,    ///< 图不可用：解析失败/IHDR 不符/像素越界/长度不符
-    PUSH_RES_BUSY = 7,        ///< 忙；与 PUSH_ERR_BUSY 同值同义（预留）
-    PUSH_RES_WRITE_FAIL = 10, ///< 写盘或上屏失败；与 PUSH_ERR_WRITE_FAIL 同值同义
+    PUSH_RES_WRITE_FAIL = 2,  ///< 写盘或上屏失败（独立号段，非 PUSH_ERR_WRITE_FAIL=10）
+    PUSH_RES_BUSY = 3,        ///< 忙，暂不可接收（独立号段，非 PUSH_ERR_BUSY=7）
 };
 
 /// BEGIN 帧（83 字节，全部小端）—— 冻结布局，与 APK 参考实现逐字节一致。
