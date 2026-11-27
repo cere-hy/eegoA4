@@ -40,10 +40,9 @@ static inline unsigned wifiInternalMax() {
 }  // namespace
 
 WifiSelectionActivity::WifiSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                             const bool autoConnect, const bool retryHintOnEnter,
-                                             const bool showFailureHint)
+                                             const bool autoConnect, const bool retryHintOnEnter)
     : Activity("WifiSelection", renderer, mappedInput), UiAppHost(renderer), allowAutoConnect(autoConnect),
-      retryHintOnEnter(retryHintOnEnter), showFailureHint(showFailureHint) {}
+      retryHintOnEnter(retryHintOnEnter) {}
 
 void WifiSelectionActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<WifiSelectionActivity*>(user);
@@ -1274,13 +1273,7 @@ void WifiSelectionActivity::renderConnectionFailed(const Rect* screen, const The
 
   UITheme::drawCenteredText(renderer, *screen, UI_12_FONT_ID, top - 20, tr(STR_CONNECTION_FAILED), true,
                             EpdFontFamily::BOLD);
-  // b65-s3c-pf9l5: showFailureHint is DISPLAY-ONLY. It gates this one hint line
-  // and nothing else — the "连接失败"/STR_CONNECTION_FAILED title above still
-  // renders, and state/auto-connect/linkHandedOver are untouched. Default true
-  // keeps every other call site byte-behaviour identical to pf9l4.
-  if (showFailureHint) {
-    UITheme::drawCenteredText(renderer, *screen, UI_10_FONT_ID, top + 20, connectionError.c_str());
-  }
+  UITheme::drawCenteredText(renderer, *screen, UI_10_FONT_ID, top + 20, connectionError.c_str());
 
   // Use centralized button hints
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_DONE), "", "");

@@ -388,10 +388,11 @@ void CrossPointWebServerActivity::startNetworkSwitch() {
 
   // autoConnect=false -> WifiSelectionActivity::allowAutoConnect=false, so it
   // will NOT auto-reconnect the saved (poor) credential; the user must pick a
-  // network. retryHintOnEnter tells the user a switch is in progress.
+  // network. b65-s3c-pf9l6: retryHintOnEnter=false too, so this proactive
+  // switch goes straight to the scan list with no misleading failure hint.
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput,
                                                                  /*autoConnect=*/false,
-                                                                 /*retryHintOnEnter=*/true),
+                                                                 /*retryHintOnEnter=*/false),
                          [this](const ActivityResult& result) { onNetworkSwitchResult(result); });
 }
 
@@ -499,13 +500,11 @@ void CrossPointWebServerActivity::requestNetworkSwitch() {
   networkSwitchInProgress = true;
   state = WebServerActivityState::WIFI_SELECTION;
   LOG_INF("WEBACT", "pf9l3: switch requested; keeping old server/WiFi up while selecting (no teardown)");
-  // b65-s3c-pf9l5: suppress the misleading "connection failed, retry" hint on a
-  // PROACTIVE switch. retryHintOnEnter stays true (state machine + auto-connect
-  // short-circuit unchanged); showFailureHint is display-only.
+  // b65-s3c-pf9l6: proactive switch — both false so no failure state and no
+  // short-circuit; autoConnect=false skips auto-reconnect and lands on scan.
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput,
                                                                  /*autoConnect=*/false,
-                                                                 /*retryHintOnEnter=*/true,
-                                                                 /*showFailureHint=*/false),
+                                                                 /*retryHintOnEnter=*/false),
                          [this](const ActivityResult& result) { onNetworkSwitchResult(result); });
 }
 
