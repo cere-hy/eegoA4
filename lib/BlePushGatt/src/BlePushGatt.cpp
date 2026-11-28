@@ -2,6 +2,7 @@
 // Compiled only for the EEGO A4 peripheral build; every other board links the
 // no-op stub at the bottom of this file.
 #include "BlePushGatt.h"
+#include "AdvNamePrefix.h"  // 000-39b2bd: eego- / PicoPush- 编译期分流
 
 #if defined(FREEINK_DEVICE_EEGO_A4) && FREEINK_DEVICE_EEGO_A4
 
@@ -235,7 +236,8 @@ bool begin() {
   NimBLEDevice::setMTU(kPreferredMtu);
 
   const uint16_t token = tokenFromStaMac();
-  snprintf(s_status.advName, sizeof(s_status.advName), "PicoPush-%04X", token);
+  // 000-39b2bd: 前缀 eego-（EEGO 构建）/ PicoPush-（非 EEGO），后缀派生与格式不变。
+  snprintf(s_status.advName, sizeof(s_status.advName), PUSH_ADV_NAME_PREFIX "%04X", token);
 
   s_server = NimBLEDevice::createServer();
   if (s_server == nullptr) {

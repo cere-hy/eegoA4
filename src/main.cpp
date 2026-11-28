@@ -325,7 +325,7 @@ bool deliver(const bleturner::Action action) {
 }
 
 bool yieldForRadio() { return true; }  // the reader keeps no parser alive between pages
-// §7 one radio, one master: while the system-level PicoPush peripheral owns the
+// §7 one radio, one master: while the system-level push peripheral owns the
 // radio, the HID page-turner central refuses to come up (beginOwned checks this
 // before port::begin()). This is connection-level exclusivity, not page-based.
 bool fileTransferActive() { return blepushgatt::radioOwned(); }
@@ -816,8 +816,8 @@ void setup() {
   // isInitialized probes). All four BLE subsystems are gated by the single
   // dual-judgment helper; no BLE symbol is reached in WiFi mode.
   if (!WIFI_TRANSFER_ACTIVE()) {
-    // B3: bring up the system-level PicoPush GATT peripheral from boot so a phone
-    // can find "PicoPush-XXXX" on the library home without opening any page.
+    // B3: bring up the system-level push GATT peripheral from boot so a phone
+    // can find "eego-XXXX" on the library home without opening any page.
     // Advertising/link state only ever reaches the UI as ordinary frame content
     // (g_bleConnected is read at the next normal render) — never a repaint here.
     blepushgatt::begin();
