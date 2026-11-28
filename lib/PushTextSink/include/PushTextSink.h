@@ -46,4 +46,11 @@ void init();
 // task. Returns true once per completed push.
 bool takePushCompleted();
 
+// 000-39b3: after a type=5 wallpaper is written + validated, a one-shot flag is
+// raised on the NimBLE host task. The main loop consumes it and decides here
+// (on the UI task) whether to show immediately (Home/wallpaper screen) or leave
+// the pending flag for consumption when the reader exits. Never call UI from
+// the host task. Returns true once per successful wallpaper landing.
+bool takeWallpaperDone();
+
 }  // namespace pushtextsink

@@ -1037,6 +1037,44 @@ void loop() {
       }
     }
 
+    // 000-39b3 改动4: type=5 壁纸落盘成功后，按推送时所在界面决定触发策略。
+    //  - Home / 壁纸界面：直接上屏（用户推完抬头就能看到，避免重复推）；
+    //  - 阅读页 / 文件浏览：只保留 pending（wallpaper_rx::rxEnd 已置），退出到 Home 时
+    //    由下方 isForegroundHomeShown 的上升沿消费，不打断正在读的书。
+    // 消费 one-shot 后取 pending：即使即时上屏也走 takePending，保证 pending 不残留。
+    if (pushtextsink::takeWallpaperDone()) {
+      const bool inReader = activityManager.isReaderActivity();
+      const bool inHome = activityManager.isForegroundHomeShown();
+      if (!inReader && inHome) {
+        uint32_t wpCrc = 0;
+        if (wallpaper_rx::takePending(wallpaper_rx::g_rx, &wpCrc)) {
+          LOG_INF("WALL", "type=5 landed on home; showing now crc=%08x", wpCrc);
+          const uint8_t res = wallpaper::showWallpaper(
+              renderer, wallpaper_rx::kWallpaperFinal, nullptr);
+          LOG_INF("WALL", "auto show result=%d", static_cast<unsigned>(res));
+        }
+      } else {
+        // 阅读页/文件浏览：保留 pending，等回到 Home 时由下方上升沿消费。
+        LOG_INF("WALL", "type=5 landed while in reader/browser; pending kept");
+      }
+    }
+    // 阅读页退出后回到 Home 的上升沿：消费遗留的壁纸 pending（不打断阅读本身）。
+    {
+      static bool wasHome = true;
+      const bool inHomeNow = activityManager.isForegroundHomeShown();
+      const bool inReaderNow = activityManager.isReaderActivity();
+      if (inHomeNow && !inReaderNow && !wasHome && wallpaper_rx::g_rx.pending) {
+        uint32_t wpCrc = 0;
+        if (wallpaper_rx::takePending(wallpaper_rx::g_rx, &wpCrc)) {
+          LOG_INF("WALL", "reader exited; applying pending wallpaper crc=%08x", wpCrc);
+          const uint8_t res = wallpaper::showWallpaper(
+              renderer, wallpaper_rx::kWallpaperFinal, nullptr);
+          LOG_INF("WALL", "deferred show result=%d", static_cast<unsigned>(res));
+        }
+      }
+      wasHome = inHomeNow;
+    }
+
     // Bluetooth page turner, before the USB drive's early return: a card handed to USB stops the radio
     // before anything else.
     bleturner::Scene scene{};

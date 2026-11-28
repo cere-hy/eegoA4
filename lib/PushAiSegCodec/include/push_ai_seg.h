@@ -51,6 +51,9 @@ extern "C" {
 #define PAS_ST_ERR        (0x13u)
 #define PAS_ST_MAX        (16u)
 #define PAS_CAP_AI_MULTI  (1u << 2)
+/* 000-39b3: bit5 壁纸能力。仅 EEGO 构建在 CAPS(0x18) 应答里与 AI_MULTI 一起置位；
+   0x04(AI_MULTI) | 0x20(WALLPAPER) = 0x24 —— APK 侧 D1 cap= 的直接验收值。 */
+#define PAS_CAP_WALLPAPER (1u << 5)
 
 /* 0x08 分段载荷（解码结果）*/
 typedef struct {

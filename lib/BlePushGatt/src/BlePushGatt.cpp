@@ -159,9 +159,16 @@ class StatusCallbacks : public NimBLECharacteristicCallbacks {
     // this bit the APK keeps sending 0x07 short frames (169B truncation).
     if (subscribed) {
       uint8_t caps[5];
-      const size_t n = pas_caps_encode(PAS_CAP_AI_MULTI, caps, sizeof(caps));
+      // 000-39b3: EEGO 构建置 bit5（壁纸能力），与非-EEGO 广播名分流同一宏、编译期决定，
+      // 不做运行时判断。目标 caps=0x24（AI_MULTI 0x04 | WALLPAPER 0x20）。
+#if defined(FREEINK_DEVICE_EEGO_A4) && FREEINK_DEVICE_EEGO_A4
+      const uint32_t capBits = PAS_CAP_AI_MULTI | PAS_CAP_WALLPAPER;
+#else
+      const uint32_t capBits = PAS_CAP_AI_MULTI;
+#endif
+      const size_t n = pas_caps_encode(capBits, caps, sizeof(caps));
       if (n && sendStatusFrame(caps, n)) {
-        log("STATUS 0x18 caps=0x%x sent (CAP_AI_MULTI)", (unsigned)PAS_CAP_AI_MULTI);
+        log("STATUS 0x18 caps=0x%x sent (AI_MULTI|WALLPAPER)", (unsigned)capBits);
       } else {
         log("WARN STATUS 0x18 caps send FAILED");
       }

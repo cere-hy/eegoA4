@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "BlePushGatt": "*",
-    "PushTextCore": "*"
+    "PushTextCore": "*",
+    "WallpaperReceiver": "*"
   }
 }

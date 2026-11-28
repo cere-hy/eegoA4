@@ -10,6 +10,12 @@
 #include <PushTextFilter.h>
 #include <PushThumb.h>
 #include <push_sink_core.h>
+#include <WallpaperReceiverApi.h>  // 000-39b3: type=5 帧分流到壁纸接收链（落盘/校验/pending）
+
+// 000-39b3: PUSH_TYPE_WALLPAPER 编译期常量（push_proto.h 由 push_sink_core.h 引入）。
+#ifndef PUSH_TYPE_WALLPAPER
+#define PUSH_TYPE_WALLPAPER 5
+#endif
 
 #include <atomic>
 #include <cstdarg>
@@ -67,6 +73,22 @@ uint32_t g_partBytes = 0;  // appends this session (for logging)
 uint32_t g_expectCrc = 0;
 uint32_t g_expectLen = 0;
 bool g_haveBegin = false;
+// 000-39b3: 当前会话 type。type=5 走壁纸接收链，不进文本 .part/PUSH.txt。
+uint8_t g_sessionType = 0;
+// 000-39b3: 壁纸落盘成功 one-shot，main loop 消费后按界面状态决定即时上屏或留 pending。
+std::atomic<bool> g_wallpaperDone{false};
+
+/// 000-39b3: 把 wallpaper_rx 的 PUSH_RES_* 结果码翻成 STATUS 帧写进 g_core.status。
+/// OK → DONE(0x12)+1B 0；UNUSABLE/WRITE_FAIL/BUSY → ERR(0x13)+1B res code。
+static void emitWallpaperResult(uint8_t res) {
+  const uint8_t op = (res == PUSH_RES_OK) ? PUSH_ST_DONE : PUSH_ST_ERR;
+  const size_t n = push_status_encode(op, &res, 1, g_core.status, sizeof(g_core.status));
+  g_core.status_len = n;
+  // 用 logPrintf 而非 logf：本函数在匿名 namespace 中早于 logf 定义，
+  // 直接调 logf 会被解析成 math.h 的 float logf(float)。
+  logPrintf("INF", "WALL", "WALLPAPER RX result=%u STATUS op=0x%02X len=%u",
+            (unsigned)res, (unsigned)op, (unsigned)n);
+}
 
 // PROGRESS throttle: at most one status notification per 400 ms.
 uint32_t g_lastProgressMs = 0;
@@ -388,21 +410,36 @@ void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
   if (op == PUSH_OP_BEGIN) {
     driveConnected(now);
     push_begin_t b;
-    if (push_begin_decode(frame, len, &b)) {
+    const bool haveBegin = push_begin_decode(frame, len, &b);
+    if (haveBegin) {
       g_expectCrc = b.crc32;
       g_expectLen = b.total_len;
       g_haveBegin = true;
+      g_sessionType = b.type;
     }
-    beginPart();  // fresh document: truncate .part
     logf("CTRL BEGIN len=%u crc=0x%08X type=%u state=%d",
          (unsigned)g_expectLen, (unsigned)g_expectCrc,
-         (unsigned)(g_haveBegin ? g_core.sess.begin.type : 0), (int)g_core.sess.state);
+         (unsigned)(haveBegin ? b.type : 0), (int)g_core.sess.state);
+
+    // 000-39b3: type=5 走壁纸接收链，不进文本 .part / PUSH.txt / push_sink_core 状态机。
+    // wallpaper_rx 有自己的 BUSY/CRC/长度/pending 语义（PUSH_RES_* 码表）。
+    if (haveBegin && b.type == PUSH_TYPE_WALLPAPER) {
+      const uint8_t res = wallpaper_rx::rxBegin(b.total_len, b.crc32);
+      emitWallpaperResult(res);
+      emitStatus(now);
+      return;
+    }
+
+    beginPart();  // fresh document: truncate .part
     push_sink_core_on_ctrl(&g_core, frame, len);
     emitStatus(now);
     return;
   }
 
   if (op == PUSH_OP_RESUME_QUERY) {
+    // 000-39b3: 壁纸会话不支持文本 .part 断点续传；壁纸 RxState 无 resume offset。
+    // 断连重连后 APK 重发 BEGIN，rxBegin 若上张未完成会回 BUSY(3)，语义正确。
+    if (g_sessionType == PUSH_TYPE_WALLPAPER) return;
     driveConnected(now);
     if (Storage.exists(kPartPath)) {
       uint32_t sz = 0;
@@ -420,6 +457,17 @@ void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
   }
 
   if (op == PUSH_OP_END) {
+    // 000-39b3: type=5 —— 壁纸链 END：rxEnd 内部做磁盘回读 CRC/长度 + 丢弃 sink 解码预校验
+    // + 原子 rename + pending。结果码 PUSH_RES_* 直接翻 STATUS（0→DONE，1/2/3→ERR）。
+    if (g_sessionType == PUSH_TYPE_WALLPAPER) {
+      const uint8_t res = wallpaper_rx::rxEnd();
+      emitWallpaperResult(res);
+      if (res == PUSH_RES_OK) g_wallpaperDone.store(true, std::memory_order_release);
+      emitStatus(now);
+      g_sessionType = 0;
+      g_haveBegin = false;
+      return;
+    }
     closePart();
     // Verify from disk BEFORE feeding END: inject the external CRC verdict so
     // the core's VERIFY uses our full-file CRC (covers resume segments too).
@@ -472,7 +520,13 @@ void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
   }
 
   if (op == PUSH_OP_ABORT) {
-    closePart();
+    if (g_sessionType == PUSH_TYPE_WALLPAPER) {
+      wallpaper_rx::rxAbort();  // 删 .part、复位，不动已有 wallpaper.png
+      g_sessionType = 0;
+      g_haveBegin = false;
+    } else {
+      closePart();
+    }
     logf("CTRL ABORT");
   } else {
     logf("CTRL op=0x%02X recv (state=%d)", (unsigned)op, (int)g_core.sess.state);
@@ -490,6 +544,22 @@ void onData(const uint8_t* frame, size_t len) {
   size_t payload_len = 0;
   const bool decodable = push_data_decode(frame, len, &seq, &payload, &payload_len);
 
+  // 000-39b3: type=5 —— DATA 直接喂壁纸接收链（≤241B/片由 rxAppend 内部累积 CRC + 写 .part），
+  // 不进文本 .part，也不走 push_sink_core 状态机（壁纸有独立 RxState）。
+  if (g_sessionType == PUSH_TYPE_WALLPAPER) {
+    if (decodable) {
+      const uint8_t res = wallpaper_rx::rxAppend(payload, payload_len);
+      if (res != PUSH_RES_OK) {
+        wallpaper_rx::rxAbort();
+        emitWallpaperResult(res);
+        emitStatus(now);
+        g_sessionType = 0;
+        g_haveBegin = false;
+      }
+    }
+    return;
+  }
+
   const uint32_t acts = push_sink_core_on_data(&g_core, frame, len);
   if ((acts & PUSH_ACT_APPEND) && decodable) {
     if (!appendPart(payload, payload_len)) {
@@ -504,6 +574,9 @@ void onData(const uint8_t* frame, size_t len) {
 void init() {
   if (g_ready) return;
   push_sink_core_init(&g_core);
+  wallpaper_rx::initReceiver();  // 000-39b3: 确保壁纸目录存在（幂等）
+  g_sessionType = 0;
+  g_wallpaperDone.store(false, std::memory_order_release);
   g_token = blepushgatt::tokenFromStaMac();
   push_sink_core_arm(&g_core, g_token, 0u, 0u, millis());
   push_sink_core_adv_up(&g_core);
@@ -523,6 +596,11 @@ bool takePushCompleted() {
   return g_pushCompleted.exchange(false, std::memory_order_acq_rel);
 }
 
+// 000-39b3: 壁纸落盘成功 one-shot。main loop 消费后按界面状态决定即时上屏或留 pending。
+bool takeWallpaperDone() {
+  return g_wallpaperDone.exchange(false, std::memory_order_acq_rel);
+}
+
 }  // namespace pushtextsink
 
 #else  // non-EEGO-A4: inert stubs
@@ -530,6 +608,7 @@ bool takePushCompleted() {
 namespace pushtextsink {
 void init() {}
 bool takePushCompleted() { return false; }
+bool takeWallpaperDone() { return false; }
 }  // namespace pushtextsink
 
 #endif
