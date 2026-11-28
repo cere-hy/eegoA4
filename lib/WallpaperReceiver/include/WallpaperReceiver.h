@@ -41,6 +41,11 @@ constexpr uint8_t kWpRxStageRowCount = 4;
 constexpr uint8_t kWpRxStageIndex = 5;
 constexpr uint8_t kWpRxStageRefresh = 6;
 
+/// 000-39b3a: 会话空闲超时阈值(ms)。放在纯逻辑头以便 host 断言行为向调用。
+/// APK 一轮扫描约 12s，正常整段传输远小于此；15s 覆盖协商+分片、不误杀慢连接，
+/// 也不让用户等太久。固件 API 头与断言共用此常量。
+constexpr uint32_t kWpRxIdleTimeoutMs = 15000u;
+
 /// 接收会话状态。全静态存储，无堆；单线程事件循环访问，BUSY 用 bool 标志（不用锁）。
 struct RxState {
   bool busy;           // 上一张还在处理 → PUSH_RES_BUSY
@@ -52,6 +57,10 @@ struct RxState {
   bool pending;        // 延后触发：落盘成功只置标志，下次进壁纸界面才解码
   uint32_t pendingCrc; // 落盘图的 CRC，供下次显示对账
   uint8_t lastStage;   // 最近一次失败 stage（WpStage 词汇）
+  // 000-39b3a: 会话最后活动时间 tick(millis)，供空闲超时兜底。
+  // BEGIN 时置为 now，每次 append 刷新；断链从最后一帧算起，正常慢传不被误杀。
+  // 这是施工令伪码 sessionOpenAt 的稳健化：语义=「最后活动」而非「打开时刻」。
+  uint32_t lastActivityMs;
 };
 
 inline void reset(RxState& s) {
@@ -64,6 +73,20 @@ inline void reset(RxState& s) {
   s.pending = false;
   s.pendingCrc = 0;
   s.lastStage = kWpRxStageNone;
+  s.lastActivityMs = 0;
+}
+
+/// 000-39b3a: 单一会话收尾——所有出口（rxEnd 成功/失败、rxAbort、超时）共用，
+/// 保证 busy/inSession 一律清零。这是缺陷 B 的根治：busy 不再散落在四处手写清理。
+inline void finishSession(RxState& s) {
+  s.inSession = false;
+  s.busy = false;
+}
+
+/// 000-39b3a: 空闲超时判定（纯逻辑，host 可测）。会话已开且距最后活动超过
+/// timeoutMs 即为 true。调用方负责 rxAbort() + 打日志。
+inline bool idleTimedOut(const RxState& s, uint32_t nowMs, uint32_t timeoutMs) {
+  return s.inSession && (uint32_t)(nowMs - s.lastActivityMs) >= timeoutMs;
 }
 
 /// 会话标记分发：kWpRxOp 已注册（返回 PUSH_RES_OK）；
@@ -92,7 +115,9 @@ inline uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t len) {
 }
 
 /// BEGIN：忙 → PUSH_RES_BUSY(3)；非法长度 → PUSH_RES_UNUSABLE(1)；否则起会话返回 OK。
-inline uint8_t begin(RxState& s, uint32_t totalLen, uint32_t crc32) {
+/// 注意：返回值是「开始是否成功」，不是「会话最终结果」——调用方 BEGIN 成功时
+/// 不得把它当会话 DONE 上报（000-39b3a 缺陷 A）。会话结果只在 finish()/abort 后上报。
+inline uint8_t begin(RxState& s, uint32_t totalLen, uint32_t crc32, uint32_t nowMs = 0) {
   if (s.busy || s.inSession) {
     s.lastStage = kWpRxStageHeader;
     return PUSH_RES_BUSY;
@@ -107,11 +132,12 @@ inline uint8_t begin(RxState& s, uint32_t totalLen, uint32_t crc32) {
   s.received = 0;
   s.crcAcc = 0;
   s.lastStage = kWpRxStageNone;
+  s.lastActivityMs = nowMs;  // 000-39b3a: 超时基线
   return PUSH_RES_OK;
 }
 
 /// APPEND：非会话 → UNUSABLE；超长 → UNUSABLE(rowcount)；否则累积字节与 CRC。
-inline uint8_t append(RxState& s, const uint8_t* data, size_t len) {
+inline uint8_t append(RxState& s, const uint8_t* data, size_t len, uint32_t nowMs = 0) {
   if (!s.inSession || data == nullptr) {
     s.lastStage = kWpRxStageHeader;
     return PUSH_RES_UNUSABLE;
@@ -123,6 +149,7 @@ inline uint8_t append(RxState& s, const uint8_t* data, size_t len) {
   s.crcAcc = crc32Update(s.crcAcc, data, len);
   s.received += static_cast<uint32_t>(len);
   s.lastStage = kWpRxStageNone;
+  s.lastActivityMs = nowMs;  // 000-39b3a: 每片 DATA 刷新超时基线
   return PUSH_RES_OK;
 }
 
@@ -133,8 +160,7 @@ inline uint8_t finish(RxState& s, bool crcOk, bool lenOk, bool writeOk) {
     s.lastStage = kWpRxStageHeader;
     return PUSH_RES_UNUSABLE;
   }
-  s.inSession = false;
-  s.busy = false;
+  finishSession(s);  // 000-39b3a: 唯一收尾出口，busy 必清
   if (!lenOk) {
     s.lastStage = kWpRxStageRowCount;
     return PUSH_RES_UNUSABLE;
@@ -153,7 +179,7 @@ inline uint8_t finish(RxState& s, bool crcOk, bool lenOk, bool writeOk) {
   return PUSH_RES_OK;
 }
 
-/// ABORT：丢弃本次会话，复位（失败复位要求）。
+/// ABORT：丢弃本次会话，复位（失败复位要求）。单一收尾出口，busy 必清。
 inline void abortSession(RxState& s) { reset(s); }
 
 /// 置 BUSY（硬件层在首次 append 落盘前调用；标志位即可，不用锁）。

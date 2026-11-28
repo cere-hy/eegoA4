@@ -1017,6 +1017,10 @@ void loop() {
     // clear stale receive flags. No display work — the status icon rides the next
     // normal full-frame render via g_bleConnected.
     blepushgatt::loop();
+    // 000-39b3a 改动3: 壁纸接收空闲超时兜底——挂在主循环既有节拍，不新开定时器。
+    // 正常传输每片 DATA 会刷新基线；断链/走远/APK 崩溃后 15s 无活动则 rxAbort
+    // + 打 timeout 日志，清 busy 使下次 BEGIN 可成功（治缺陷 B 的断链锁死）。
+    wallpaper_rx::rxIdleCheck(millis());
     // B5: consume the latest 0x07 definition frame (decode + append/reflow +
     // hex留证). Cheap no-op when no frame pending; never blocks the loop.
     aireceivesink::pump();

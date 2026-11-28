@@ -35,6 +35,14 @@ uint8_t rxEnd();
 /// 放弃本次接收，删除 .part，复位（失败复位要求）。
 void rxAbort();
 
+/// 000-39b3a: 空闲超时阈值 kWpRxIdleTimeoutMs 定义在 WallpaperReceiver.h（纯逻辑头），
+/// 本层与 host 断言共用同一常量（15s）。
+
+/// 000-39b3a: 空闲超时兜底。由主循环节拍周期调用（不新开定时器）。
+/// 会话在 kWpRxIdleTimeoutMs 内无任何 BEGIN/DATA 活动 → rxAbort() + 打 timeout 日志，
+/// 清 busy 使下次 BEGIN 可成功。无会话或未超时时是廉价 no-op。
+void rxIdleCheck(uint32_t nowMs);
+
 /// 000-39b2c 验证接口：从 /wallpaper/<name> 读取 PNG，按标准 DATA 分片（≤241B）
 /// 喂给接收链 rxBegin/rxAppend/rxEnd。路径白名单由调用方先校验。
 /// 返回最终 PUSH_RES_*；预期 CRC 取自源文件的整段 CRC32（与 BEGIN 帧口径一致）。

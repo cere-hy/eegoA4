@@ -424,9 +424,15 @@ void onCtrl(uint8_t op, const uint8_t* frame, size_t len) {
     // 000-39b3: type=5 走壁纸接收链，不进文本 .part / PUSH.txt / push_sink_core 状态机。
     // wallpaper_rx 有自己的 BUSY/CRC/长度/pending 语义（PUSH_RES_* 码表）。
     if (haveBegin && b.type == PUSH_TYPE_WALLPAPER) {
+      // 000-39b3a 缺陷 A：rxBegin 的返回值是「开始是否成功」，不是「会话结果」。
+      // 成功时【绝不】回 DONE——APK 收到 DONE 会立即停发 DATA，图永远收不全。
+      // 只有失败(UNUSABLE/WRITE_FAIL/BUSY)才立即回 ERR；会话 OK 只在 END 校验
+      // 通过后由下方 END 分支的 rxEnd 结果上报一次。
       const uint8_t res = wallpaper_rx::rxBegin(b.total_len, b.crc32);
-      emitWallpaperResult(res);
-      emitStatus(now);
+      if (res != PUSH_RES_OK) {
+        emitWallpaperResult(res);
+        emitStatus(now);
+      }
       return;
     }
 

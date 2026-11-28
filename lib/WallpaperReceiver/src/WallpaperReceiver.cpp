@@ -59,7 +59,9 @@ bool initReceiver() {
 }
 
 uint8_t rxBegin(uint32_t totalLen, uint32_t crc32) {
-  const uint8_t r = begin(g_rx, totalLen, crc32);
+  // 000-39b3a: 传 millis() 作超时基线；返回值是「开始是否成功」，调用方
+  // 不得将其当会话结果上报（缺陷 A）——会话结果只在 rxEnd() 后上报一次。
+  const uint8_t r = begin(g_rx, totalLen, crc32, millis());
   if (r != PUSH_RES_OK) {
     logRx("rejected stage=header code=%u (busy=%d)", static_cast<unsigned>(r), g_rx.busy ? 1 : 0);
     return r;
@@ -89,7 +91,7 @@ uint8_t rxBegin(uint32_t totalLen, uint32_t crc32) {
 }
 
 uint8_t rxAppend(const uint8_t* payload, size_t len) {
-  const uint8_t r = append(g_rx, payload, len);
+  const uint8_t r = append(g_rx, payload, len, millis());  // 000-39b3a: 刷新超时基线
   if (r != PUSH_RES_OK) {
     logRx("rejected stage=%s code=%u",
           g_rx.lastStage == kWpRxStageRowCount ? "rowcount" : "header", static_cast<unsigned>(r));
@@ -157,8 +159,7 @@ uint8_t rxEnd() {
     const uint8_t vcode = wallpaper::validateWallpaperFile(kWallpaperPart, &vstage);
     if (vcode != wallpaper::kWpOk) {
       Storage.remove(kWallpaperPart);  // 坏图不落盘，旧 wallpaper.png 保持不动（判据2）
-      g_rx.inSession = false;
-      g_rx.busy = false;
+      finishSession(g_rx);  // 000-39b3a: 单一收尾出口，busy 必清（缺陷 B）
       g_rx.lastStage = vstage;
       logRx("rejected stage=%s code=%u (decode preflight)",
             stageOf(vstage), static_cast<unsigned>(PUSH_RES_UNUSABLE));
@@ -193,6 +194,14 @@ void rxAbort() {
   Storage.remove(kWallpaperPart);
   reset(g_rx);
   logRx("aborted");
+}
+
+void rxIdleCheck(uint32_t nowMs) {
+  // 000-39b3a 改动3：主循环节拍调用。无会话/未超时是廉价 no-op。
+  if (!idleTimedOut(g_rx, nowMs, kWpRxIdleTimeoutMs)) return;
+  const uint32_t idleMs = nowMs - g_rx.lastActivityMs;
+  rxAbort();  // 删 .part + reset(g_rx)（busy/inSession 全清）
+  logRx("timeout no DATA, aborted idle=%ums", static_cast<unsigned>(idleMs));
 }
 
 uint8_t rxFeedFromFile(const char* name) {
@@ -244,6 +253,7 @@ uint8_t rxBegin(uint32_t, uint32_t) { return PUSH_RES_UNUSABLE; }
 uint8_t rxAppend(const uint8_t*, size_t) { return PUSH_RES_UNUSABLE; }
 uint8_t rxEnd() { return PUSH_RES_UNUSABLE; }
 void rxAbort() {}
+void rxIdleCheck(uint32_t) {}
 uint8_t rxFeedFromFile(const char*) { return PUSH_RES_UNUSABLE; }
 }  // namespace wallpaper_rx
 
