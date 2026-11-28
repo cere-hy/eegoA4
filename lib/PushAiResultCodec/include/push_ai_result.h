@@ -3,8 +3,8 @@
  *
  * 权威布局：ReadPicoPush 硬件接入标准白皮书 v1 §2.2「0x07 权威字段表」
  * （三端互证：固件 C push_proto.c + APK Java PushProto + PROTOCOL.md）。
- * 字段偏移以白皮书为准，与 pico-plus push_ai_result_decode 逐字节同构；
- * 不在本层反推硬编码、不复制 pico 实现，仅按权威字段表从零实现。
+ * 字段偏移以白皮书为准，与参考固件 push_ai_result_decode 逐字节同构；
+ * 不在本层反推硬编码、不复制参考固件实现，仅按权威字段表从零实现。
  *
  * 0x07 线格式（冻结，整帧恒 241 B，零填充）：
  *   offset 0  4B  头 = 50 43 07 01  ('P''C' / opcode 0x07 / version 1)

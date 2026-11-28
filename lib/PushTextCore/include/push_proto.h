@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * 中文：手机 BLE「文本推送」帧格式与 CRC32 —— B6.5 S1 完整能力版。
- * 源自 pico-plus components/push_sink，按长期定位（设备主输入通道）保留：
+ * 源自参考固件 components/push_sink，按长期定位（设备主输入通道）保留：
  *   - BEGIN/DATA/CTRL/STATUS 编解码、CRC32、512KB 上限、五种 type 全解析；
  *   - 断点续传协议号（0x03 RESUME_QUERY / STATUS 0x11 / session_id 对账锚）。
  * 不搬（去重，非阉割）：AI 帧常量与 codec（0x06/0x07/0x08/0x09）、TTS(0x19)、
@@ -55,13 +55,14 @@ enum {
     /* 0x17 AI_QUERY / 0x18 CAPS / 0x19 TTS：属其他模块，本核不定义 */
 };
 
-/// 正文类型——认全五种，落库 type 为后续格式扩展留口。
+/// 正文类型——认全六种，落库 type 为后续格式扩展留口。
 enum {
     PUSH_TYPE_TEXT = 0,     ///< 纯文本
     PUSH_TYPE_MARKDOWN = 1, ///< Markdown（当前按纯文本收，转换在手机侧）
     PUSH_TYPE_HTML = 2,     ///< HTML（同上）
     PUSH_TYPE_URL = 3,      ///< URL：协议认，业务回 ERR（URL 抓取当前不做）
     PUSH_TYPE_WORD = 4,     ///< 单词卡：按普通文本处理，落库 type=4
+    PUSH_TYPE_WALLPAPER = 5,///< 壁纸：palette PNG 索引直通，落 /wallpaper/（000-39b2b，与 APK 工作树同值）
 };
 
 /// 错误码（STATUS ERR 的 body）。编号对齐权威件。

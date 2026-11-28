@@ -84,13 +84,13 @@ uint8_t validateWallpaperFile(const char* pngPath, uint8_t* outStage) {
     if (outStage) *outStage = kWpStageHeader;
     return kWpUnusable;
   }
-  DecodeResult dec = decodeWallpaper(file, discardStripSink, nullptr, false);
+  DecodeResult dec = decodeWallpaper(file, discardStripSink, nullptr);
   file.close();
   if (outStage) *outStage = dec.stage;
   return dec.code;
 }
 
-uint8_t showWallpaper(GfxRenderer& renderer, const char* pngPath, bool swapPlanes,
+uint8_t showWallpaper(GfxRenderer& renderer, const char* pngPath,
                       const char* expectedHex) {
   // /wallpaper/ 目录（含父级）确保存在；失败不回 ERR —— 后续 openFileForRead 失败自会返回 UNUSABLE。
   if (!Storage.exists("/wallpaper")) Storage.mkdir("/wallpaper", true);
@@ -122,7 +122,7 @@ uint8_t showWallpaper(GfxRenderer& renderer, const char* pngPath, bool swapPlane
   }
 
   SinkCtx sinkCtx{&renderer, true};
-  DecodeResult dec = decodeWallpaper(file, stripSink, &sinkCtx, swapPlanes);
+  DecodeResult dec = decodeWallpaper(file, stripSink, &sinkCtx);
   file.close();
   if (dec.code != kWpOk || !sinkCtx.ok) {
     // 解码失败：显式复位灰度会话（唯一复位点），不 displayGrayBuffer → 屏幕保持之前内容。
@@ -142,14 +142,26 @@ uint8_t showWallpaper(GfxRenderer& renderer, const char* pngPath, bool swapPlane
   renderer.setRenderMode(GfxRenderer::BW);
   renderer.cleanupGrayscaleWithFrameBuffer();
 
-  // 判据日志：三行都在解码成功后打印。CRC 单行含 expected/swap；
-  // IDX_HEAD/IDX_TAIL 取换序后索引首末 16B（与 CRC 同一份数据，反序件判据 3 才对得上）。
+  // 判据日志：全部在解码成功（dec.code==kWpOk 且 sink 未放弃）后才打印——
+  // 错误件（bad/row553/f1）在上面 return，绝不出现任何 IDX_CRC_S 行（w6 控制流）。
+  // expected 语义定为 IDX_CRC（8 hex），不是 sha8；expected_kind 显式标注（变更5）。
+  // IDX_HEAD/IDX_TAIL 取换序后索引首末 16B（与 CRC 同一份数据）。
   const char* exp = (expectedHex && *expectedHex) ? expectedHex : "-";
-  LOG_INF("WALL", "WALLPAPER_PATH=direct swap=%d", swapPlanes ? 1 : 0);
-  LOG_INF("WALL", "WALLPAPER_IDX_CRC=%08x idx_len=%u raw_len=%u expected=%s swap=%d",
+  LOG_INF("WALL", "WALLPAPER_PATH=direct");
+  LOG_INF("WALL", "WALLPAPER_IDX_CRC=%08x idx_len=%u raw_len=%u expected=%s expected_kind=idx_crc",
        static_cast<unsigned>(dec.idxCrc),
        static_cast<unsigned>(kWpIdxLen),
-       static_cast<unsigned>(kWpRawLen), exp, swapPlanes ? 1 : 0);
+       static_cast<unsigned>(kWpRawLen), exp);
+  // 七段累计 CRC：与 crc_00039b2g.txt 逐字段对齐（cum_rows 在前、seg_rows 在后）。
+  // 只有全部校验通过走到这里才打；S7 的 seg_rows=480..551(72) 由 segRowRange 给出。
+  for (int s = 0; s < 7; ++s) {
+    const WpSegRange r = segRowRange(s);
+    LOG_INF("WALL", "IDX_CRC_S%d %08x cum_rows=0..%u seg_rows=%u..%u(%u)",
+            s + 1, static_cast<unsigned>(dec.seg[s]),
+            static_cast<unsigned>(r.end),
+            static_cast<unsigned>(r.begin), static_cast<unsigned>(r.end),
+            static_cast<unsigned>(r.rows));
+  }
   char headHex[kWpHeadTailBytes * 2 + 1];
   char tailHex[kWpHeadTailBytes * 2 + 1];
   bytesToHex(dec.head, kWpHeadTailBytes, headHex);

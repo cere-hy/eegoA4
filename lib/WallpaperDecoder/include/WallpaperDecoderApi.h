@@ -23,29 +23,29 @@ using StripSink = bool (*)(void* ctx, uint16_t yStart, uint8_t numRows,
 struct DecodeResult {
   uint8_t code;      // kWpOk / kWpUnusable
   uint8_t stage;     // WpStage：首个失败阶段（成功为 kWpStageNone）
-  uint32_t idxCrc;   // 换序后索引的 CRC32
+  uint32_t idxCrc;   // 换序后索引的 CRC32（= S7 累计值）
   uint8_t head[kWpHeadTailBytes];  // 换序后索引首 16B（IDX_HEAD）
   uint8_t tail[kWpHeadTailBytes];  // 换序后索引末 16B（IDX_TAIL）
+  uint32_t seg[7];   // 000-39b2b: 七段累计 CRC 快照，仅在 code=kWpOk 时有效
 };
 
 // file 已定位在 PNG offset 0。解码并逐 strip 回调；调用方据此写平面。
 // 返回 code=kWpOk 且 idxCrc 有效时，调用方才可执行 displayGrayBuffer() 上屏。
 // 任何失败都填好 stage，且绝不调 sink 之后的上屏动作。
-DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool swapPlanes);
+// 位序已定案（索引即 MSB），swapPlanes 分支已删除。
+DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx);
 
 // ---- 接线层：从 SD 卡 /wallpaper/ 读图 → 解码 → 七步上屏 ----
 // 结果码语义与 PUSH_RES_* 一致（0=OK 1=UNUSABLE 2=WRITE_FAIL）。
-// swapPlanes：位序双版开关（0=索引即MSB，1=反序）。
-// expectedHex：判据用期望 CRC 的 8 hex 字符串；nullptr 或缺省打印 '-'。
+// expectedHex：判据用期望 CRC 的 8 hex 字符串（IDX_CRC，非 sha8）；nullptr 或缺省打印 '-'。
 // 返回 PUSH_RES_OK 仅当解码成功且已 displayGrayBuffer；任何失败屏幕保持之前内容，
-// 并打 WALLPAPER_ERR code=<n> stage=<...>（五个 stage 值），成功打三行 CRC/HEAD/TAIL。
-uint8_t showWallpaper(GfxRenderer& renderer, const char* pngPath, bool swapPlanes,
+// 并打 WALLPAPER_ERR code=<n> stage=<...>（五个 stage 值），成功打 CRC/HEAD/TAIL + 七段 IDX_CRC_S1..S7。
+uint8_t showWallpaper(GfxRenderer& renderer, const char* pngPath,
                       const char* expectedHex = nullptr);
 
 // 000-39b2c: 纯解码校验（不上屏、不碰 GfxRenderer）。接收链在 rename 落盘前调用，
 // 用丢弃 sink 跑完整 inflate 以捕获 IDAT 内的索引越界/553行/filter非0——这些是
 // 57B 前缀门禁抓不到的。返回 kWpOk 才允许落盘；stage 填首个失败阶段。
-// swapPlanes 只影响打包位序，不影响校验结论，固定传 0 即可。
 uint8_t validateWallpaperFile(const char* pngPath, uint8_t* outStage = nullptr);
 
 }  // namespace wallpaper

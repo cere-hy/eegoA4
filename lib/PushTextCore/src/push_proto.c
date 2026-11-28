@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * 裁剪版 push_proto 实现：显式小端、不用 struct packing，宿主/目标逐字节一致。
- * 仅含文本推送必需的 CRC32 与 BEGIN/DATA/CTRL/STATUS 编解码——与 pico-plus
+ * 仅含文本推送必需的 CRC32 与 BEGIN/DATA/CTRL/STATUS 编解码——与参考固件
  * 权威件前 134 行逐字节同构，确保 APK 协议互认。
  */
 #include "push_proto.h"

@@ -3,8 +3,8 @@
  * （EEGO A4 rebuild, 方案乙）。
  *
  * 权威布局：ReadPicoPush 硬件接入标准白皮书 gen26.5 §2.2 / §3.4
- * （三端互证：pico 固件 push_proto.c + APK PushProto.java + PROTOCOL 变更登记）。
- * 字段偏移与 pico-plus push_proto.c 逐字节同构；本层从零实现、不复制其代码。
+ * （三端互证：参考固件 push_proto.c + APK PushProto.java + PROTOCOL 变更登记）。
+ * 字段偏移与参考固件 push_proto.c 逐字节同构；本层从零实现、不复制其代码。
  *
  * 0x08 线格式（CTRL 写方向 手机→设备；整帧恒 241 B，零填充）：
  *   offset 0   4B  头 = 50 43 08 01  ('P''C' / opcode 0x08 / version 1)

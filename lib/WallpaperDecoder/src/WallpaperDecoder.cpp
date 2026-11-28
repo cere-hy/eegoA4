@@ -74,8 +74,8 @@ size_t fillCallback(void* vctx, const uint8_t** data) {
 
 // 主解码入口。file 必须已定位在 PNG 起始（offset 0）。
 // 内部读 57 字节前门禁 → 排序 → 逐 strip 解压/反滤波/换序打包 → 回调。
-DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool swapPlanes) {
-  DecodeResult result{kWpUnusable, kWpStageHeader, 0, {}, {}};
+DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx) {
+  DecodeResult result{kWpUnusable, kWpStageHeader, 0, {}, {}, {}};
 
   uint8_t header[kWpHeaderBytes];
   if (file.read(header, kWpHeaderBytes) != kWpHeaderBytes) return result;
@@ -108,6 +108,7 @@ DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool 
   uint32_t crc = 0;
   uint16_t y = 0;
   bool aborted = false;
+  int segIdx = 0;  // 000-39b2b: 当前段号 0..6，每满一段边界采一次累计 CRC
 
   while (y < kWpHeight) {
     const int rows = (kWpHeight - y < kWpStripRows) ? (kWpHeight - y) : kWpStripRows;
@@ -124,13 +125,20 @@ DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool 
       // 绝不经过灰度转换（那是 8bit 灰度，不是索引）——陷阱条目。
 
       if (remapRow(rawRow, order, lsbStrip + static_cast<size_t>(r) * planeRowBytes,
-                   msbStrip + static_cast<size_t>(r) * planeRowBytes, swapPlanes,
+                   msbStrip + static_cast<size_t>(r) * planeRowBytes,
                    remappedRow) != kWpOk) {
         reader.deinit();
         result.stage = kWpStageIndex;
         return result;  // x5：索引越界，不上屏
       }
       crc = crc32Update(crc, remappedRow, rowBytes);  // x8：CRC 覆盖换序后索引（真正上屏内容）
+
+      // 000-39b2b: 段末采累计 CRC（S1..S6=每80行，S7=第480..551共72行，写死）。
+      // 用 segRowRange 的 end 判定，最后一段 end=551，绝不切到 560。
+      if (segIdx < 7 && static_cast<uint16_t>(y + r) == segRowRange(segIdx).end) {
+        result.seg[segIdx] = crc;
+        ++segIdx;
+      }
 
       // 只留首行/末行的换序副本用于 IDX_HEAD/IDX_TAIL（16B×2，不整图入内存）。
       if (y == 0 && r == 0)

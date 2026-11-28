@@ -1114,22 +1114,17 @@ void loop() {
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
       }
-      // 000-39b2a: 自造件直通测试。Usage: CMD:wallpaper <swap> [filename] [expected-crc8]
-      // swap: 0=index-is-MSB 1=swap；filename 缺省 wallpaper.png，只接受 /wallpaper/ 下文件名；
-      // expected-crc8 可选，缺省打 '-'。例: CMD:wallpaper 0 pat_a.png 4a3b2c1d
+      // 000-39b2b: 自造件直通测试。Usage: CMD:wallpaper [filename] [expected-idx-crc8]
+      // 位序已定死（索引即 MSB），swap 参数已删除；filename 缺省 wallpaper.png，只接受 /wallpaper/ 下文件名；
+      // expected 是 IDX_CRC 8 hex（非 sha8），缺省打 '-'。例: CMD:wallpaper pat_a.png 8e840a0e
       else if (cmd == "wallpaper" || cmd.startsWith("wallpaper ")) {
         String args = (cmd.length() > 10) ? cmd.substring(10) : String();
         args.trim();
         const int sp1 = args.indexOf(' ');
-        const String swapStr = (sp1 < 0) ? args : args.substring(0, sp1);
-        String rest = (sp1 < 0) ? String() : args.substring(sp1 + 1);
-        rest.trim();
-        const int sp2 = rest.indexOf(' ');
-        String nameStr = (sp2 < 0) ? rest : rest.substring(0, sp2);
-        String expStr = (sp2 < 0) ? String() : rest.substring(sp2 + 1);
+        String nameStr = (sp1 < 0) ? args : args.substring(0, sp1);
+        String expStr = (sp1 < 0) ? String() : args.substring(sp1 + 1);
         nameStr.trim();
         expStr.trim();
-        const bool swap = (swapStr == "1");
         if (nameStr.length() == 0) nameStr = "wallpaper.png";
         // 000-39b2c: 延后触发的消费点 —— 进壁纸界面时若有接收链待显示的新图，
         // 先取走 pending（记录 CRC），随后正常解码 wallpaper.png 上屏。
@@ -1144,8 +1139,8 @@ void loop() {
         } else {
           const String path = String("/wallpaper/") + nameStr;
           const char* exp = (expStr.length() > 0) ? expStr.c_str() : nullptr;
-          const uint8_t res = wallpaper::showWallpaper(renderer, path.c_str(), swap, exp);
-          logSerial.printf("wallpaper_result=%d swap=%d\n", res, swap ? 1 : 0);
+          const uint8_t res = wallpaper::showWallpaper(renderer, path.c_str(), exp);
+          logSerial.printf("wallpaper_result=%d\n", res);
         }
       }
       // 000-39b2c: 壁纸接收链验证（构造帧，不依赖 APK/bit5）。

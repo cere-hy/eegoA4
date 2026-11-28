@@ -79,7 +79,7 @@ bool secondary(void* ctx, uint32_t cp, uint8_t style, TtfEpdFont& font) {
     uint8_t rec[kPif1Record];
     if (g_reader->get(cp, rec)) {
       // S3c P1: getSizeInPixels() is an em ppem; PIF1 px is asc-desc height.
-      // pif1PxFromEmPx() converts em->asc-desc (x1.448) before the Pico formulas.
+      // pif1PxFromEmPx() converts em->asc-desc (x1.448) before the scaling formulas.
       const int px = pif1PxFromEmPx(font.family().getSizeInPixels());
       const int w = scaledW(rec[2], px);
       const int h = scaledW(rec[3], px);

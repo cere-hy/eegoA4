@@ -1,7 +1,7 @@
 /*
  * push_scene_host_test.c — 0x1A scene 编码器的纯主机侧判据（batch B4）。
  *
- * 编译（与 pico push_sink_host_test 同构，gcc + ASan/UBSan）：
+ * 编译（与参考固件 push_sink_host_test 同构，gcc + ASan/UBSan）：
  *   cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
  *      -Iinclude src/push_scene.c test/push_scene_host_test.c -o /tmp/psc_test
  *

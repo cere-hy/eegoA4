@@ -10,7 +10,7 @@
 // System-level BLE push peripheral (EEGO A4 rebuild, batch B3).
 //
 // Owns a NimBLE GATT server whose service table is copied byte-for-byte from the
-// pico reference (components/push_sink/src/push_sink.c, draft §3.1): 128-bit
+// reference firmware (components/push_sink/src/push_sink.c, draft §3.1): 128-bit
 // service e2f5a1c0-9b7d-4e3f-8a61-3c9d2b7e5f10 with DATA(..11, WWR), CTRL(..12,
 // WWR) and STATUS(..13, READ|NOTIFY + CCCD). Advertising is system-level and
 // persistent from boot: "PicoPush-%04X", token = Wi-Fi STA MAC [4]<<8|[5].

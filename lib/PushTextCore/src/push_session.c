@@ -53,13 +53,14 @@ static bool window_expired(const push_session_t *s, uint32_t now_ms) {
 }
 
 /// BEGIN 会话级校验：token / type / total_len。
-/// 五种 type 全解析；URL(3) 明确回 FETCH（不支持，非未知帧丢弃）；
-/// 未知 type(>4) 回 BAD_FRAME；WORD 按普通文本要求有正文。
+/// 六种 type 全解析（000-39b2b 追加 WALLPAPER=5）；URL(3) 明确回 FETCH（不支持，非未知帧丢弃）；
+/// 未知 type(>5) 回 BAD_FRAME；WORD/WALLPAPER 都带正文。
 static int begin_check(const push_session_t *s, const push_begin_t *b) {
     if (b->token != s->token) return PUSH_ERR_BAD_FRAME;
-    if (b->type > PUSH_TYPE_WORD) return PUSH_ERR_BAD_FRAME;      // 未知 type：明确 ERR
+    if (b->type > PUSH_TYPE_WALLPAPER) return PUSH_ERR_BAD_FRAME;  // 未知 type(>5)：明确 ERR
     if (b->type == PUSH_TYPE_URL) return PUSH_ERR_FETCH;           // 认 type=3，业务不支持
-    // TEXT/MARKDOWN/HTML/WORD 都带正文：total_len ∈ (0, PUSH_TOTAL_MAX]
+    // 判据边界与 push_type_route() 一致（type=5 归壁纸、不进文本 sink，见 push_session.h）。
+    // TEXT/MARKDOWN/HTML/WORD/WALLPAPER 都带正文：total_len ∈ (0, PUSH_TOTAL_MAX]
     if (b->total_len == 0) return PUSH_ERR_BAD_FRAME;
     if (b->total_len > PUSH_TOTAL_MAX) return PUSH_ERR_TOO_LARGE;
     return PUSH_ERR_NONE;

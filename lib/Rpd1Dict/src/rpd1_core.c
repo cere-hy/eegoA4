@@ -1,6 +1,6 @@
 /*
  * RPD1 offline dictionary core — format logic ported verbatim from
- * pico-plus/main/dict/dict_lookup.c. Only the storage backend changed
+ * reference firmware main/dict/dict_lookup.c. Only the storage backend changed
  * (injected rpd1_io_t instead of POSIX FILE*). Constants, offsets, binary
  * search, key-window scan and stemming are byte-for-byte upstream.
  */

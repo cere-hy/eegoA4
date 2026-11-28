@@ -147,7 +147,7 @@ class DataCallbacks : public NimBLECharacteristicCallbacks {
 
 // B4′: track the STATUS CCCD so fire-and-forget scene notify never fires into a
 // void (or throws when the peer has not subscribed). Mirrors the ACK/notify
-// subscription gate in the pico reference.
+// subscription gate in the reference firmware.
 class StatusCallbacks : public NimBLECharacteristicCallbacks {
   void onSubscribe(NimBLECharacteristic*, NimBLEConnInfo&, uint16_t subValue) override {
     const bool subscribed = (subValue & 0x0001u) != 0;

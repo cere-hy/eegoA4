@@ -1,6 +1,6 @@
 /*
  * ai_segasm — 0x08 释义分帧重组器（方案乙 S2，纯逻辑、无 ESP-IDF → 宿主可测）。
- * 移植自 pico 参考固件 components/push_sink，语义钉死不变，唯 AI_SEGASM_MAX
+ * 移植自参考固件 components/push_sink，语义钉死不变，唯 AI_SEGASM_MAX
  * 由 4096 提到 8192（白皮书名义上限；用户裁定 8192）。缓冲为结构体内联数组，
  * 实例化处用静态全局（不占任务栈）。
  *

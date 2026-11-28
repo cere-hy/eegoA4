@@ -16,16 +16,12 @@
  * 约定：
  *   - 像素索引 0..3；code 0..3（0=黑 1=深灰 2=浅灰 3=白）
  *   - code 的 bit1 → MSB 平面，bit0 → LSB 平面；字节内高位在前（与 PngToBmpConverter 2bpp 同位序）
- *   - WALLPAPER_SWAP_PLANE：0=索引即 MSB（默认），1=两平面互换（位序实测用）
+ *   - 位序已定案：索引即 MSB，无双平面互换分支（000-39b2b）。
  */
 #pragma once
 
 #include <stddef.h>
 #include <stdint.h>
-
-#ifndef WALLPAPER_SWAP_PLANE
-#define WALLPAPER_SWAP_PLANE 0
-#endif
 
 namespace wallpaper {
 
@@ -143,11 +139,11 @@ inline uint8_t sortPalette(const uint8_t* plte12, uint8_t outOrder[4]) {
 
 // 把一行 768 个索引换序 + 越界校验 + 打包进两条 strip 平面行（每行 widthBytes=96 字节）。
 // idx: 反滤波后的原始索引行（每字节一索引，bitDepth=8/colorType=3）。
-// order: sortPalette 输出。lsb/msb: 96 字节输出。swap: 位序双版开关。
+// order: sortPalette 输出。lsb/msb: 96 字节输出。位序固定索引即 MSB（无 swap 分支）。
 // remappedOut: 可选（可为 nullptr），写出换序后 code 序列 768 字节，供 CRC 累加（x8）。
 // 任一索引 > 3 → kWpUnusable（x5：不上屏）。
 inline uint8_t remapRow(const uint8_t* idx, const uint8_t order[4],
-                        uint8_t* lsb, uint8_t* msb, bool swap,
+                        uint8_t* lsb, uint8_t* msb,
                         uint8_t* remappedOut = nullptr) {
   constexpr int W = kWpWidth;
   constexpr int WB = W / 8;  // 96
@@ -158,12 +154,10 @@ inline uint8_t remapRow(const uint8_t* idx, const uint8_t order[4],
     const uint8_t code = order[raw];
     if (remappedOut) remappedOut[x] = code;
     const uint8_t bit = static_cast<uint8_t>(0x80u >> (x & 7));
-    const uint8_t planeMsb = (code & 0x02u) ? bit : 0;
-    const uint8_t planeLsb = (code & 0x01u) ? bit : 0;
-    const uint8_t toMsb = swap ? planeLsb : planeMsb;
-    const uint8_t toLsb = swap ? planeMsb : planeLsb;
-    msb[x >> 3] |= toMsb;
-    lsb[x >> 3] |= toLsb;
+    const uint8_t planeMsb = (code & 0x02u) ? bit : 0;  // 索引 bit1 → MSB 平面
+    const uint8_t planeLsb = (code & 0x01u) ? bit : 0;  // 索引 bit0 → LSB 平面
+    msb[x >> 3] |= planeMsb;
+    lsb[x >> 3] |= planeLsb;
   }
   return kWpOk;
 }
@@ -178,6 +172,20 @@ inline uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t len) {
       c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
   }
   return c ^ 0xFFFFFFFFu;
+}
+
+// ---- 000-39b2b: 七段 CRC 快照的行区间 ----
+// 552 = 6*80 + 72：S1..S6 各 80 行，S7 固定 72 行（480..551），绝不按 80 循环切第七次。
+// 纯函数供 host 行为向断言（w5）：喂 seg=6 必须得 {480,551,72}；若误按 80 循环会得到 end=559/rows=80。
+struct WpSegRange { uint16_t begin; uint16_t end; uint16_t rows; };
+inline WpSegRange segRowRange(int seg) {
+  if (seg < 0) seg = 0;
+  if (seg > 6) seg = 6;
+  const uint16_t begin = static_cast<uint16_t>(seg * kWpStripRows);  // 0,80,..,480
+  const uint16_t end = (seg == 6)
+      ? static_cast<uint16_t>(kWpHeight - 1)                         // 551（72 行，写死）
+      : static_cast<uint16_t>((seg + 1) * kWpStripRows - 1);         // 79,159,..,479
+  return WpSegRange{begin, end, static_cast<uint16_t>(end - begin + 1)};
 }
 
 // ---- 000-39b2a 测试接口（纯逻辑，host 行为向可测）----

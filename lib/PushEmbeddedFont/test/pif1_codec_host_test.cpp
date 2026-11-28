@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
   CHECK(ink > 0, "16px downscaled glyph has ink");
   CHECK(ink > 0, "16px glyph has ink");
 
-  // Scaling formulas match Pico semantics.
+  // Scaling formulas match reference firmware semantics.
   CHECK(scaledAdvance(24, 24) == 24, "advance 24px identity");
   CHECK(scaledAdvance(24, 12) == 12, "advance 12px half");
   CHECK(scaledLeft(-13, 14) == -8, "floor negative x0 @14px (-7.58 -> -8)");

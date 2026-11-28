@@ -10,9 +10,10 @@
  *   - 壁纸会话复用标准 BEGIN/DATA/END；DATA 帧裸 seq(u16 LE)+len(u8)+payload，单包 ≤241B；
  *   - BEGIN 带 total_len + crc32(IEEE 0xEDB88320) 双校验，END 触发校验；
  *   - 落盘路径由固件约定 /wallpaper/ 固定文件名，APK 不指定。
- *   kWpRxOp 是固件侧定义的「壁纸会话标记」，落在白皮书预留段 0x0A–0x0F，
- *   供构造帧验证用；APK 真实帧的判别在 000-39b3 置 bit5 时与此对齐
- *   （000-44 APK 答复明确：帧内版本字段属 000-39 议题、需新定）。
+ *   kWpRxOp 是固件侧定义的「壁纸会话标记」，落在白皮书预留段 0x0C–0x0F，
+ *   供构造帧验证用；APK 真实帧的判别在 000-39b3 置 bit5 时与此对齐。
+ *   000-39b2b: 从 0x0A 迁到 0x0C —— 定性是「预留区内提前挪，为将来同步 gen30
+ *   做准备」；gen22 基线上 0x0A 本就是预留、无占用冲突（APK 已确认）。
  */
 #pragma once
 
@@ -25,9 +26,10 @@ extern "C" {
 
 namespace wallpaper_rx {
 
-/// 壁纸接收会话标记（固件侧定义；白皮书 CTRL opcode 预留段 0x0A–0x0F）。
+/// 壁纸接收会话标记（固件侧定义；白皮书 CTRL opcode 预留段 0x0C–0x0F）。
 /// 非 APK 真实帧 opcode —— APK 复用标准 BEGIN(0x01)/DATA/END(0x02)。
-constexpr uint8_t kWpRxOp = 0x0A;
+/// 0x0C：预留区内提前挪（为将来同步 gen30 做准备）；gen22 上 0x0A 本就无占用冲突。
+constexpr uint8_t kWpRxOp = 0x0C;
 
 /// 日志 stage —— 复用 b2a WpStage 六值集合，不新增词（w5）。
 /// 落盘失败映射到 kWpRxStageRefresh（sink/上屏失败，语义最接近写盘失败）。

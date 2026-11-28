@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * 中文：手机 BLE 推流的会话状态机 —— B6.5 S1 完整能力版。源自 pico-plus
+ * 中文：手机 BLE 推流的会话状态机 —— B6.5 S1 完整能力版。源自参考固件
  * push_session，按长期定位（设备主输入通道）完整保留：七态（含 COOLDOWN）、
  * 断点续传（RESUME_QUERY/adopt/resume/has_part）、CR C/长度收全判据、动作位掩码。
  * 纯 C11：不碰文件/NVS/射频/时钟，宿主测试驱动全部转移边。
@@ -106,6 +106,22 @@ void push_session_adopt(push_session_t *s, const push_begin_t *begin, uint32_t r
 
 /// 窗口剩余毫秒；0 表示无超时或已不在窗口。
 uint32_t push_session_window_left_ms(const push_session_t *s, uint32_t now_ms);
+
+/// 000-39b2b: BEGIN type 的路由分类（纯函数，无副作用，host 可直测）。
+/// 0=文本落库 sink / 1=壁纸接收链（不进文本 sink）/ 2=URL 不支持 / 3=未知 BAD_FRAME。
+/// begin_check 用它保证 type=5 判据放宽后仍被明确路由到壁纸而非文本 sink。
+enum {
+    PUSH_ROUTE_TEXT = 0,
+    PUSH_ROUTE_WALLPAPER = 1,
+    PUSH_ROUTE_FETCH = 2,
+    PUSH_ROUTE_BAD = 3,
+};
+static inline int push_type_route(uint8_t type) {
+    if (type > PUSH_TYPE_WALLPAPER) return PUSH_ROUTE_BAD;
+    if (type == PUSH_TYPE_URL) return PUSH_ROUTE_FETCH;
+    if (type == PUSH_TYPE_WALLPAPER) return PUSH_ROUTE_WALLPAPER;
+    return PUSH_ROUTE_TEXT;
+}
 
 #ifdef __cplusplus
 }

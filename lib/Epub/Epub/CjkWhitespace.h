@@ -27,7 +27,7 @@
 // SINGLE SOURCE OF TRUTH (addendum clause 54): this header is the ONLY CJK
 // codepoint-range definition in the repository. Do NOT duplicate the Han ranges
 // (isCjkIdeograph) anywhere else — firmware, host tests, tools and any port must
-// include this header instead. Upstream pico-plus carried two copies of the set
+// include this header instead. Upstream reference firmware carried two copies of the set
 // and they drifted apart in the 0x2000 punctuation block, producing divergent
 // line breaking between builds. Any future range change belongs here, once.
 namespace CjkWhitespace {
