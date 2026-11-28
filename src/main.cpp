@@ -1110,11 +1110,31 @@ void loop() {
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
       }
-      // 000-39b2: 自造件直通测试。Usage: CMD:wallpaper [0|1]  (swap plane 0=index-is-MSB, 1=swap)
+      // 000-39b2a: 自造件直通测试。Usage: CMD:wallpaper <swap> [filename] [expected-crc8]
+      // swap: 0=index-is-MSB 1=swap；filename 缺省 wallpaper.png，只接受 /wallpaper/ 下文件名；
+      // expected-crc8 可选，缺省打 '-'。例: CMD:wallpaper 0 pat_a.png 4a3b2c1d
       else if (cmd == "wallpaper" || cmd.startsWith("wallpaper ")) {
-        const bool swap = cmd.startsWith("wallpaper 1");
-        const uint8_t res = wallpaper::showWallpaper(renderer, "/wallpaper/wallpaper.png", swap);
-        logSerial.printf("wallpaper_result=%d swap=%d\n", res, swap ? 1 : 0);
+        String args = (cmd.length() > 10) ? cmd.substring(10) : String();
+        args.trim();
+        const int sp1 = args.indexOf(' ');
+        const String swapStr = (sp1 < 0) ? args : args.substring(0, sp1);
+        String rest = (sp1 < 0) ? String() : args.substring(sp1 + 1);
+        rest.trim();
+        const int sp2 = rest.indexOf(' ');
+        String nameStr = (sp2 < 0) ? rest : rest.substring(0, sp2);
+        String expStr = (sp2 < 0) ? String() : rest.substring(sp2 + 1);
+        nameStr.trim();
+        expStr.trim();
+        const bool swap = (swapStr == "1");
+        if (nameStr.length() == 0) nameStr = "wallpaper.png";
+        if (!wallpaper::isSafeWallpaperName(nameStr.c_str())) {
+          logSerial.printf("wallpaper_result=1 reject_name\n");
+        } else {
+          const String path = String("/wallpaper/") + nameStr;
+          const char* exp = (expStr.length() > 0) ? expStr.c_str() : nullptr;
+          const uint8_t res = wallpaper::showWallpaper(renderer, path.c_str(), swap, exp);
+          logSerial.printf("wallpaper_result=%d swap=%d\n", res, swap ? 1 : 0);
+        }
       }
 #ifdef PUSH_TEST_INJECT_WRITE_FAIL
       // 000-39b1a-t: test-only. Usage: CMD:push_test_fail <0|1|2|3>

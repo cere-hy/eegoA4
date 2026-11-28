@@ -75,7 +75,7 @@ size_t fillCallback(void* vctx, const uint8_t** data) {
 // 主解码入口。file 必须已定位在 PNG 起始（offset 0）。
 // 内部读 57 字节前门禁 → 排序 → 逐 strip 解压/反滤波/换序打包 → 回调。
 DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool swapPlanes) {
-  DecodeResult result{kWpUnusable, 0};
+  DecodeResult result{kWpUnusable, kWpStageHeader, 0, {}, {}};
 
   uint8_t header[kWpHeaderBytes];
   if (file.read(header, kWpHeaderBytes) != kWpHeaderBytes) return result;
@@ -84,7 +84,10 @@ DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool 
   if (checkHeader(header, meta) != kWpOk) return result;
 
   uint8_t order[4];
-  if (sortPalette(header + kPlteDataOffset, order) != kWpOk) return result;
+  if (sortPalette(header + kPlteDataOffset, order) != kWpOk) {
+    result.stage = kWpStagePlte;
+    return result;
+  }
 
   // 定位 IDAT：前置 57 字节后紧跟的可能是 tRNS 等 ancillary，findNextIdat 会跳过。
   FillCtx fillCtx{&file, 0, false, {}};
@@ -113,9 +116,9 @@ DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool 
 
     for (int r = 0; r < rows; ++r) {
       uint8_t filter;
-      if (!reader.read(&filter, 1)) { reader.deinit(); return result; }
-      if (filter != 0) { reader.deinit(); return result; }  // x4：壁纸规格 filter 恒 0，非 0 拒收
-      if (!reader.read(rawRow, rowBytes)) { reader.deinit(); return result; }
+      if (!reader.read(&filter, 1)) { reader.deinit(); result.stage = kWpStageRowCount; return result; }  // 截断
+      if (filter != 0) { reader.deinit(); result.stage = kWpStageFilter; return result; }  // x4
+      if (!reader.read(rawRow, rowBytes)) { reader.deinit(); result.stage = kWpStageRowCount; return result; }  // 截断
 
       // rawRow 即反滤波后的索引原值（filter=0 无需反滤波）；
       // 绝不经过灰度转换（那是 8bit 灰度，不是索引）——陷阱条目。
@@ -124,27 +127,41 @@ DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool 
                    msbStrip + static_cast<size_t>(r) * planeRowBytes, swapPlanes,
                    remappedRow) != kWpOk) {
         reader.deinit();
+        result.stage = kWpStageIndex;
         return result;  // x5：索引越界，不上屏
       }
       crc = crc32Update(crc, remappedRow, rowBytes);  // x8：CRC 覆盖换序后索引（真正上屏内容）
+
+      // 只留首行/末行的换序副本用于 IDX_HEAD/IDX_TAIL（16B×2，不整图入内存）。
+      if (y == 0 && r == 0)
+        std::memcpy(result.head, remappedRow, kWpHeadTailBytes);
+      if (y + rows == kWpHeight && r == rows - 1)
+        std::memcpy(result.tail, remappedRow + rowBytes - kWpHeadTailBytes, kWpHeadTailBytes);
     }
 
     if (!sink(sinkCtx, y, static_cast<uint8_t>(rows), lsbStrip, msbStrip)) {
       aborted = true;
+      result.stage = kWpStageRefresh;
       break;
     }
     y += static_cast<uint16_t>(rows);
   }
-  // x3：553 行拒收。写满 552 行后再尝试读一行的 filter；若还能读出数据，
+  // x3/y1：553 行拒收。写满 552 行后再尝试读一行的 filter；若还能读出数据，
   // 说明源图行数超过 552（zlib 流未结束）→ 判 unusable，调用方不会 displayGrayBuffer，屏幕保持。
+  // 判定走 header 纯函数 classifyExtraRow，host 行为向可喂 true/false。
   if (!aborted && y == kWpHeight) {
     uint8_t extra;
-    if (reader.read(&extra, 1)) aborted = true;
+    const bool readable = reader.read(&extra, 1);
+    if (classifyExtraRow(readable) == kWpUnusable) {  // host y1 行为向测的同一函数
+      aborted = true;
+      result.stage = kWpStageRowCount;
+    }
   }
   reader.deinit();
 
   if (aborted || y != kWpHeight) return result;
   result.code = kWpOk;
+  result.stage = kWpStageNone;
   result.idxCrc = crc;
   return result;
 }

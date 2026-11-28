@@ -41,6 +41,23 @@ constexpr size_t kWpHeaderBytes = 57;                                          /
 constexpr uint8_t kWpOk = 0;
 constexpr uint8_t kWpUnusable = 1;
 
+// 000-39b2a: 失败阶段（WALLPAPER_ERR stage=<值>）。解码器在首个失败点记录，
+// 接线层统一打印；五值 + None，本批不扩。分段后真机排查一眼可分。
+enum WpStage : uint8_t {
+  kWpStageNone = 0,       // 成功
+  kWpStageHeader = 1,     // 57B 前置门禁 / IDAT 定位 / inflate 初始化失败
+  kWpStagePlte = 2,       // PLTE 守卫失败
+  kWpStageFilter = 3,     // 某行 filter != 0
+  kWpStageRowCount = 4,   // 截断(<552行) 或 超行(>552行，多读一字节命中)
+  kWpStageIndex = 5,      // 索引越界 > 3
+  kWpStageRefresh = 6,    // sink 终止 / displayGrayscaleBase 失败
+};
+
+// IDX_HEAD / IDX_TAIL 各取「换序后」索引缓冲的首末 16 字节（= 32 hex 字符），
+// 与 CRC 覆盖同一份数据（x8 口径一致，反序件判据 3 才能对上）。
+constexpr size_t kWpHeadTailBytes = 16;
+constexpr size_t kWpFilenameMax = 63;
+
 // ---- 前置门禁 ----
 struct WpMeta {
   uint32_t width;
@@ -161,6 +178,41 @@ inline uint32_t crc32Update(uint32_t crc, const uint8_t* data, size_t len) {
       c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
   }
   return c ^ 0xFFFFFFFFu;
+}
+
+// ---- 000-39b2a 测试接口（纯逻辑，host 行为向可测）----
+
+// y1/y6 行数门禁：写完 kWpHeight 行后多读一字节，若还能读出数据 → 源图行数 > 552
+// → 返回 kWpUnusable（stage=rowcount，由调用方记录）；read 返回 false(zlib 流正常结束) → kWpOk。
+// 抽成纯函数供 host 行为向喂 true/false；流式层用它判定，不能只做字符串匹配。
+inline uint8_t classifyExtraRow(bool extraByteReadable) {
+  return extraByteReadable ? kWpUnusable : kWpOk;
+}
+
+// y4 CMD 文件名白名单：只接受 /wallpaper/ 下的文件名，拒绝空串、含 '/'、含 ".."、
+// 长度 > kWpFilenameMax、以及绝对路径。合法返回 true。喂三个恶意串验证。
+inline bool isSafeWallpaperName(const char* name) {
+  if (name == nullptr) return false;
+  size_t len = 0;
+  for (const char* p = name; *p != '\0'; ++p) {
+    ++len;
+    if (len > kWpFilenameMax) return false;
+    if (*p == '/') return false;                 // 不接受任何路径分隔符
+    if (*p == '\\') return false;                // 反斜杠同样拒绝
+    if (*p == '.' && *(p + 1) == '.') return false;  // 拒绝 ".."
+  }
+  if (len == 0) return false;
+  return true;
+}
+
+// 从「换序后」索引缓冲取首末 16 字节，填进 hex 输出（IDX_HEAD/IDX_TAIL）。
+// remapped: 长度 kWpIdxLen 的换序 code 序列；head/tail: 各 16 字节。
+inline void extractHeadTail(const uint8_t* remapped, uint8_t head[kWpHeadTailBytes],
+                            uint8_t tail[kWpHeadTailBytes]) {
+  for (size_t i = 0; i < kWpHeadTailBytes; ++i) {
+    head[i] = remapped[i];
+    tail[i] = remapped[kWpIdxLen - kWpHeadTailBytes + i];
+  }
 }
 
 }  // namespace wallpaper
