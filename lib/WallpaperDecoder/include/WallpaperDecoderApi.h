@@ -42,4 +42,10 @@ DecodeResult decodeWallpaper(HalFile& file, StripSink sink, void* sinkCtx, bool 
 uint8_t showWallpaper(GfxRenderer& renderer, const char* pngPath, bool swapPlanes,
                       const char* expectedHex = nullptr);
 
+// 000-39b2c: 纯解码校验（不上屏、不碰 GfxRenderer）。接收链在 rename 落盘前调用，
+// 用丢弃 sink 跑完整 inflate 以捕获 IDAT 内的索引越界/553行/filter非0——这些是
+// 57B 前缀门禁抓不到的。返回 kWpOk 才允许落盘；stage 填首个失败阶段。
+// swapPlanes 只影响打包位序，不影响校验结论，固定传 0 即可。
+uint8_t validateWallpaperFile(const char* pngPath, uint8_t* outStage = nullptr);
+
 }  // namespace wallpaper

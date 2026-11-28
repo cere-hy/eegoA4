@@ -71,6 +71,25 @@ static void resetGraySession(GfxRenderer& renderer) {
   renderer.setRenderMode(GfxRenderer::BW);
 }
 
+// 000-39b2c: 丢弃 sink —— 接收链落盘前校验用。只让 decodeWallpaper 把每行走完
+// （从而触发索引越界/行数/filter 守卫），不写任何离屏缓冲、不碰 renderer、不上屏。
+bool discardStripSink(void* /*vctx*/, uint16_t /*yStart*/, uint8_t /*numRows*/,
+                      const uint8_t* /*lsb*/, const uint8_t* /*msb*/) {
+  return true;
+}
+
+uint8_t validateWallpaperFile(const char* pngPath, uint8_t* outStage) {
+  HalFile file;
+  if (!Storage.openFileForRead("WALL", pngPath, file)) {
+    if (outStage) *outStage = kWpStageHeader;
+    return kWpUnusable;
+  }
+  DecodeResult dec = decodeWallpaper(file, discardStripSink, nullptr, false);
+  file.close();
+  if (outStage) *outStage = dec.stage;
+  return dec.code;
+}
+
 uint8_t showWallpaper(GfxRenderer& renderer, const char* pngPath, bool swapPlanes,
                       const char* expectedHex) {
   // /wallpaper/ 目录（含父级）确保存在；失败不回 ERR —— 后续 openFileForRead 失败自会返回 UNUSABLE。

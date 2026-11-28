@@ -1,0 +1,7 @@
+{
+  "name": "WallpaperReceiver",
+  "version": "1.0.0",
+  "description": "000-39b2c wallpaper receive chain: frame -> .part -> validate -> rename -> pending. No bit5, no decode-to-screen.",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

@@ -8,6 +8,7 @@ extern "C" void push_test_set_fail_point(int p);  // 000-39b1a-t: test-only, def
 #endif
 #include <ScenePush.h>  // diag-pace: non-blocking pacer for multi-frame 0x1A bursts
 #include <WallpaperDecoderApi.h>  // 000-39b2: palette PNG -> 2bpp direct wallpaper
+#include <WallpaperReceiverApi.h>  // 000-39b2c: wallpaper RX -> .part -> decode -> rename -> pending
 #include <BoardConfig.h>
 #include <Epub.h>
 #include <FontCacheManager.h>
@@ -824,6 +825,9 @@ void setup() {
     // sink handler for 0x01–0x05; a BEGIN yields READY — the APK's wait signal.
     // 0x07/0x08 keep their dedicated AI hooks (set below), untouched.
     pushtextsink::init();
+    // 000-39b2c: wallpaper receive chain init (ensure /wallpaper/ exists). No bit5,
+    // no APK push; RX is exercised via construction-frame commands below.
+    wallpaper_rx::initReceiver();
     // B5: arm the 0x07 AI-definition receive hook (double-slot ring + main-loop
     // pump). Persistent like B3 advertising, independent of any reader page.
     aireceivesink::init();
@@ -1127,6 +1131,14 @@ void loop() {
         expStr.trim();
         const bool swap = (swapStr == "1");
         if (nameStr.length() == 0) nameStr = "wallpaper.png";
+        // 000-39b2c: 延后触发的消费点 —— 进壁纸界面时若有接收链待显示的新图，
+        // 先取走 pending（记录 CRC），随后正常解码 wallpaper.png 上屏。
+        {
+          uint32_t pendingCrc = 0;
+          if (wallpaper_rx::takePending(wallpaper_rx::g_rx, &pendingCrc)) {
+            logSerial.printf("wallpaper_rx_pending=%08x\n", pendingCrc);
+          }
+        }
         if (!wallpaper::isSafeWallpaperName(nameStr.c_str())) {
           logSerial.printf("wallpaper_result=1 reject_name\n");
         } else {
@@ -1134,6 +1146,20 @@ void loop() {
           const char* exp = (expStr.length() > 0) ? expStr.c_str() : nullptr;
           const uint8_t res = wallpaper::showWallpaper(renderer, path.c_str(), swap, exp);
           logSerial.printf("wallpaper_result=%d swap=%d\n", res, swap ? 1 : 0);
+        }
+      }
+      // 000-39b2c: 壁纸接收链验证（构造帧，不依赖 APK/bit5）。
+      // Usage: CMD:wallpaper_rx <filename>  —— 从 /wallpaper/<filename> 读 PNG，
+      // 按标准 DATA 分片喂接收链：校验 CRC/长度 + 落盘前纯解码校验 → 原子落盘 → 置 pending。
+      // 只接受安全文件名（与 CMD:wallpaper 同源白名单）；不打断当前界面（延后上屏）。
+      else if (cmd == "wallpaper_rx" || cmd.startsWith("wallpaper_rx ")) {
+        String arg = (cmd.length() > 12) ? cmd.substring(12) : String();
+        arg.trim();
+        if (arg.length() == 0 || !wallpaper::isSafeWallpaperName(arg.c_str())) {
+          logSerial.printf("wallpaper_rx_result=1 reject_name\n");
+        } else {
+          const uint8_t res = wallpaper_rx::rxFeedFromFile(arg.c_str());
+          logSerial.printf("wallpaper_rx_result=%d name=%s\n", res, arg.c_str());
         }
       }
 #ifdef PUSH_TEST_INJECT_WRITE_FAIL
